@@ -1,0 +1,235 @@
+"""
+测试 backend/tts/queue.py 和 backend/video/frame_buffer.py
+"""
+
+import io
+import heapq
+import time
+import pytest
+from unittest.mock import MagicMock
+
+from backend.tts.queue import TTSQueue, Priority, TTSItem
+from backend.video.frame_buffer import FrameBuffer
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TTSQueue
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.fixture
+def queue_idle(mock_tts_engine, mock_asr_handler):
+    """
+    inter_gap=0 方便测试。
+    mock_tts_engine 的 speak_async 会同步调用 on_complete（见 conftest）。
+    """
+    return TTSQueue(mock_tts_engine, mock_asr_handler, inter_gap=0.0)
+
+
+def make_item(text, priority, age_sec=0.0, expire_sec=30.0):
+    """helper: 构造 TTSItem，age_sec > 0 表示入队多久前"""
+    return TTSItem(
+        priority=priority,
+        enqueue_time=time.time() - age_sec,
+        text=text,
+        expire_sec=expire_sec,
+    )
+
+
+class TestTTSQueueImmediate:
+    def test_push_when_idle_speaks_immediately(self, queue_idle, mock_tts_engine):
+        queue_idle.push("你好", Priority.FAST_HINT)
+        mock_tts_engine.speak_async.assert_called_once()
+        assert mock_tts_engine.speak_async.call_args[0][0] == "你好"
+
+    def test_empty_text_not_pushed(self, queue_idle, mock_tts_engine):
+        queue_idle.push("", Priority.FAST_HINT)
+        mock_tts_engine.speak_async.assert_not_called()
+
+    def test_asr_muted_before_speak(self, queue_idle, mock_asr_handler):
+        queue_idle.push("测试", Priority.FAST_HINT)
+        mock_asr_handler.mute.assert_called()
+
+    def test_asr_unmuted_after_complete(self, queue_idle, mock_asr_handler):
+        """on_complete（由 mock engine 同步触发）→ asr.unmute()"""
+        queue_idle.push("测试", Priority.FAST_HINT)
+        mock_asr_handler.unmute.assert_called()
+
+
+class TestTTSQueuePriority:
+    def test_user_answer_interrupts_current(self, mock_tts_engine, mock_asr_handler):
+        """USER_ANSWER 推入时，当前播报被 stop() 打断"""
+        mock_tts_engine.speak_async.side_effect = lambda text, on_complete=None: None
+
+        q = TTSQueue(mock_tts_engine, mock_asr_handler, inter_gap=0.0)
+        q.push("慢通道建议", Priority.SLOW_ADVICE)   # 开始播放，不完成
+        mock_tts_engine.stop.reset_mock()
+
+        q.push("用户回答", Priority.USER_ANSWER)
+        mock_tts_engine.stop.assert_called()
+
+    def test_priority_heap_ordering(self, mock_tts_engine, mock_asr_handler):
+        """
+        堆中多个 item，按 priority 值（小 = 高优先）顺序播出。
+        直接操作堆并手动调用 _speak_next，绕过 threading.Timer 竞态。
+        """
+        speak_order = []
+        mock_tts_engine.speak_async.side_effect = \
+            lambda text, on_complete=None: speak_order.append(text)
+
+        q = TTSQueue(mock_tts_engine, mock_asr_handler, inter_gap=0.0)
+
+        # 在"说话中"状态下推入三个不同优先级的 item
+        q._is_speaking = True
+        for text, pri in [
+            ("慢总结", Priority.SLOW_SUMMARY),
+            ("快提示", Priority.FAST_HINT),
+            ("慢建议", Priority.SLOW_ADVICE),
+        ]:
+            with q._lock:
+                heapq.heappush(q._heap, make_item(text, pri))
+
+        # 手动逐条驱动（不依赖 Timer）
+        for _ in range(3):
+            q._is_speaking = False
+            q._speak_next()
+
+        assert speak_order == ["快提示", "慢建议", "慢总结"]
+
+
+class TestTTSQueueExpiry:
+    def test_expired_item_discarded(self, mock_tts_engine, mock_asr_handler):
+        """enqueue_time 过期的 item 弹出时被丢弃，speak_async 不被调用"""
+        q = TTSQueue(mock_tts_engine, mock_asr_handler, inter_gap=0.0)
+        with q._lock:
+            heapq.heappush(q._heap, make_item("过期", Priority.FAST_HINT,
+                                               age_sec=100.0, expire_sec=2.0))
+        q._speak_next()
+        mock_tts_engine.speak_async.assert_not_called()
+
+    def test_non_expired_item_spoken(self, queue_idle, mock_tts_engine):
+        queue_idle.push("新鲜提示", Priority.SLOW_ADVICE)
+        mock_tts_engine.speak_async.assert_called_once()
+
+
+class TestTTSQueueClear:
+    def test_clear_by_priority_removes_target(self, mock_tts_engine, mock_asr_handler):
+        q = TTSQueue(mock_tts_engine, mock_asr_handler, inter_gap=0.0)
+        q._is_speaking = True
+
+        for text, pri in [
+            ("慢建议", Priority.SLOW_ADVICE),
+            ("快提示", Priority.FAST_HINT),
+            ("用户回答", Priority.USER_ANSWER),
+        ]:
+            with q._lock:
+                heapq.heappush(q._heap, make_item(text, pri))
+
+        q.clear_by_priority([Priority.SLOW_ADVICE])
+
+        texts = [item.text for item in q._heap]
+        assert "慢建议"  not in texts
+        assert "快提示"  in texts
+        assert "用户回答" in texts
+
+    def test_clear_and_stop_empties_heap(self, mock_tts_engine, mock_asr_handler):
+        q = TTSQueue(mock_tts_engine, mock_asr_handler, inter_gap=0.0)
+        q._is_speaking = True
+        with q._lock:
+            heapq.heappush(q._heap, make_item("测试", Priority.SLOW_ADVICE))
+        q.clear_and_stop()
+        assert len(q._heap) == 0
+        mock_tts_engine.stop.assert_called()
+
+
+class TestTTSCallbacks:
+    def test_on_speak_start_called_with_text_and_channel(self, mock_tts_engine, mock_asr_handler):
+        on_start = MagicMock()
+        mock_tts_engine.speak_async.side_effect = lambda text, on_complete=None: None
+
+        q = TTSQueue(mock_tts_engine, mock_asr_handler, inter_gap=0.0)
+        q.set_callbacks(on_start=on_start)
+        q.push("快提示文本", Priority.FAST_HINT)
+
+        on_start.assert_called_once_with("快提示文本", "fast")
+
+    def test_on_speak_end_called_after_complete(self, mock_tts_engine, mock_asr_handler):
+        on_end = MagicMock()
+        # mock engine 同步调用 on_complete
+        mock_tts_engine.speak_async.side_effect = \
+            lambda text, on_complete=None: on_complete() if on_complete else None
+
+        q = TTSQueue(mock_tts_engine, mock_asr_handler, inter_gap=0.0)
+        q.set_callbacks(on_end=on_end)
+        q.push("测试", Priority.FAST_HINT)
+
+        on_end.assert_called()
+
+    def test_broadcast_audio_injected_to_engine(self, mock_tts_engine, mock_asr_handler):
+        """broadcast_audio 回调被注入到 engine.on_audio_data"""
+        broadcast = MagicMock()
+        TTSQueue(mock_tts_engine, mock_asr_handler,
+                 inter_gap=0.0, broadcast_audio=broadcast)
+        assert mock_tts_engine.on_audio_data is broadcast
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# FrameBuffer
+# ═══════════════════════════════════════════════════════════════════════
+
+def make_jpeg_bytes(width=256, height=256) -> bytes:
+    from PIL import Image
+    img = Image.new("RGB", (width, height), color=(100, 150, 200))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+class TestFrameBuffer:
+    def test_push_updates_latest_frame(self):
+        fb = FrameBuffer()
+        fb.push(make_jpeg_bytes(), 1.5)
+        assert fb.latest_frame is not None
+        assert fb.video_position == 1.5
+
+    def test_push_invalid_jpeg_ignored(self):
+        fb = FrameBuffer()
+        fb.push(b"not a jpeg", 1.0)
+        assert fb.latest_frame is None
+
+    def test_pause_blocks_push(self):
+        fb = FrameBuffer()
+        fb.pause()
+        fb.push(make_jpeg_bytes(), 2.0)
+        assert fb.latest_frame is None
+
+    def test_resume_allows_push(self):
+        fb = FrameBuffer()
+        fb.pause()
+        fb.resume()
+        fb.push(make_jpeg_bytes(), 3.0)
+        assert fb.latest_frame is not None
+
+    def test_seek_clears_frame(self):
+        fb = FrameBuffer()
+        fb.push(make_jpeg_bytes(), 5.0)
+        assert fb.latest_frame is not None
+        fb.seek(10.0)
+        assert fb.latest_frame is None
+
+    def test_initial_state(self):
+        fb = FrameBuffer()
+        assert fb.latest_frame is None
+        assert fb.video_position == 0.0
+        assert fb.duration_sec == 0.0
+
+    def test_multiple_pushes_keep_latest_time(self):
+        fb = FrameBuffer()
+        fb.push(make_jpeg_bytes(), 1.0)
+        fb.push(make_jpeg_bytes(), 2.0)
+        assert fb.video_position == 2.0
+
+    def test_pushed_frame_is_pil_image(self):
+        from PIL import Image
+        fb = FrameBuffer()
+        fb.push(make_jpeg_bytes(), 1.0)
+        assert isinstance(fb.latest_frame, Image.Image)

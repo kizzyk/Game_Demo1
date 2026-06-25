@@ -65,8 +65,8 @@ class ActionFilter:
         self._current_pattern_type: str   = "WAIT"
         self._pattern_start:        float = 0.0
 
-        # 最近一次全局播报时间（全局最小间隔用）
-        self._last_any_trigger: float = 0.0
+        # float('-inf') 确保游戏开始时第一个事件不被全局间隔阻挡
+        self._last_any_trigger: float = float('-inf')
 
     def process(self,
                 signal: PerceptionSignal,
@@ -94,7 +94,7 @@ class ActionFilter:
             return None
 
         # 单类事件冷却检查
-        last = self._last_trigger.get(event.type, 0.0)
+        last = self._last_trigger.get(event.type, float('-inf'))
         cooldown = self.COOLDOWNS.get(event.type, 3.0)
         if video_time - last < cooldown:
             self._prev_signal = signal
