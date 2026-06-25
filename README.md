@@ -31,7 +31,9 @@ demo/
 ├── backend/
 │   ├── main.py                  # FastAPI 主入口，WebSocket 服务，系统协调
 │   ├── config.py                # 全局配置（所有可调参数集中于此）
-│   ├── video/frame_pipe.py      # 视频帧提取，帧率控制，与播放时间轴同步
+│   ├── video/
+│   │   ├── frame_buffer.py      # ★ 接收前端推帧，供 NitroGen 读取（Fix 11）
+│   │   └── frame_pipe.py        # 备用：cv2 本地读帧（当前未被主流程使用）
 │   ├── nitrogen/
 │   │   ├── client.py            # ZMQ 客户端，异步推理循环
 │   │   └── parser.py            # action chunk → PerceptionSignal
@@ -44,10 +46,10 @@ demo/
 │   │   ├── vlm_client.py        # Claude API 调用，Prompt 管理
 │   │   └── trigger.py           # VLMRequestManager（生命周期、去重、取消）
 │   ├── tts/
-│   │   ├── engine.py            # edge-tts 封装，预缓存，pygame 播放
+│   │   ├── engine.py            # edge-tts 封装，预缓存，MP3 bytes 发往前端（Fix 14）
 │   │   └── queue.py             # 优先级队列，过期丢弃，ASR mute 联动
 │   └── asr/
-│       └── handler.py           # Whisper + VAD，持续收音，TTS 期间静音
+│       └── handler.py           # Whisper + 独立转写线程 + VAD（Fix 13）
 ├── frontend/
 │   ├── index.html               # 页面结构
 │   ├── style.css                # 暗色主题样式
@@ -81,11 +83,11 @@ requirements.txt 中额外安装的包：
 | 包 | 版本 | 用途 |
 |----|------|------|
 | pyzmq | 27.1.0 | NitroGen ZMQ 通信 |
-| opencv-python | 4.13.0 | 视频帧提取 |
+| opencv-python | 4.13.0 | 视频处理工具（frame_pipe.py 备用） |
 | anthropic | 0.112.0 | Claude VLM API |
 | openai-whisper | 20250625 | 本地语音识别 |
 | edge-tts | 7.2.8 | TTS 合成（需联网） |
-| pygame | 2.6.1 | 音频播放 |
+| pygame | 2.6.1 | ~~音频播放~~ 已不再用于 TTS 播放（Fix 14） |
 | aiofiles | 25.1.0 | 异步文件操作 |
 
 ### 配置 .env
@@ -123,9 +125,9 @@ python run.py
 浏览器访问：`http://localhost:8000`
 
 1. 点击"选择视频"，选择本地游戏视频文件（MP4/AVI/MKV）
-2. 点击"▶ 开始分析"
-3. 浏览器会请求麦克风权限，允许后系统开始持续收音
-4. 视频播放时，AI 语音提示会自动播报
+2. 点击"▶ 开始分析"（无需传路径给后端，前端直接推帧）
+3. 浏览器请求麦克风权限，允许后系统开始持续收音
+4. 视频播放时，AI 语音提示会通过**浏览器扬声器**自动播报
 5. 随时开口说话即可提问
 
 ---
@@ -134,7 +136,7 @@ python run.py
 
 ### 核心架构（全部完成）
 
-- [x] **VideoFramePipe**：按 10fps 从视频文件提取帧，与播放时间轴同步，支持 seek/pause/resume
+- [x] **FrameBuffer**（Fix 11）：接收前端 canvas 推帧（10fps JPEG + 视频时间戳），供 NitroGen 读取；与 VideoFramePipe 接口兼容，NitroGenClient 无需修改；同时解决了文件路径传递问题
 - [x] **NitroGenClient**：ZMQ REQ/REP 通信，异步推理循环，2 秒超时自动重连
 - [x] **PerceptionSignal 解析**：`j_left/j_right/buttons` → 主导意图/置信度/移动方向/预测序列；使用 `chunk[6..15]` 补偿 200ms 推理延迟
 - [x] **ActionFilter**：5 类事件检测（SUDDEN_DODGE / ATTACK_WINDOW / SUSTAINED_DANGER / MOVEMENT_SHIFT / PATTERN_COMPLETED），三层过滤（突变检测 + 置信度 + 冷却时间）
@@ -144,11 +146,11 @@ python run.py
 - [x] **FastHistory**：近期快通道播报记录（10 秒有效），避免慢通道内容重复
 - [x] **VLM 客户端**：Claude API 异步调用，图像 + 上下文 + 感知信号组合 prompt
 - [x] **VLMRequestManager**：单 in-flight + 单 pending 管理，USER_QUESTION 取消当前请求，同类事件 5 秒去重
-- [x] **TTSEngine**：edge-tts 封装，pygame 播放，常用短语预缓存，支持即时停止
+- [x] **TTSEngine**（Fix 14）：edge-tts 合成 → MP3 bytes 通过 WebSocket 发往前端播放；用 pydub 精确估算播放时长触发 on_complete；不再依赖 pygame
 - [x] **TTSQueue**：4 级优先级堆，过期自动丢弃，USER_ANSWER 打断，与 ASRHandler mute/unmute 联动
-- [x] **ASRHandler**：Whisper 本地识别，振幅 VAD，TTS 期间暂停避免回声，force_unmute 供 seek 使用
+- [x] **ASRHandler**（Fix 13）：独立转写线程 + Queue，`_flush()` 非阻塞，VAD 期间 Whisper 可并发运行；振幅 VAD，TTS 期间暂停避免回声
 - [x] **FastAPI 主入口**：`/start`、`/stop` HTTP API，`/ws` WebSocket，GameSession 全系统协调，视频 seek 全状态重置
-- [x] **前端基础框架**：视频播放器、对话面板（快/慢/用户/AI 四种气泡）、调试面板、Web Audio API 麦克风采集（PCM 16kHz）
+- [x] **前端**（Fix 11、14）：canvas 帧捕获（10fps → WebSocket 二进制）；TTS 音频接收并用 Audio API 播放；麦克风 PCM 采集；对话面板；调试面板
 
 ### 配置（全部完成）
 
@@ -157,6 +159,18 @@ python run.py
 ---
 
 ## 遗留问题与 TODO
+
+### ✅ 已解决的架构问题
+
+| 原编号 | 问题 | 解决方式 |
+|--------|------|---------|
+| 11 | VideoFramePipe 与视频播放不真正同步 | 前端 canvas 10fps 截帧 → WS 二进制推送，后端 FrameBuffer 接收，彻底消除累积误差 |
+| 13 | Whisper 阻塞 ASR 线程 | 独立转写线程 + Queue，`_flush()` 非阻塞，VAD 与 Whisper 并发运行 |
+| 14 | TTS 只在服务端播放 | TTSEngine 合成后通过 WS `send_bytes` 发 MP3，前端 Audio API 播放，移除 pygame 依赖 |
+| 2  | 前端文件路径无法传给后端 | Fix 11 已使后端不再需要视频文件路径，此问题自然消除 |
+| 3  | edge-tts 与 pygame 的 asyncio 嵌套风险 | Fix 14 移除了 pygame，TTS 播放路径不再经过 pygame |
+
+---
 
 ### 🔴 关键阻塞项（必须解决才能运行）
 
@@ -168,28 +182,11 @@ python run.py
 - 具体工作：在 GPU 机器上跑通 `scripts/serve.py`，验证 ZMQ 请求/响应格式与 `backend/nitrogen/client.py` 的假设一致
 - 关键不确定点：NitroGen 的 `response["pred"]` 字典键名是否是 `j_left/j_right/buttons`，shape 是否为 `(16,2)/(16,2)/(16,21)`
 
-**2. 前端视频文件路径传递**
-
-Demo 前端使用 `file.path`（Electron 特有属性）传递本地文件路径给后端。在普通浏览器中 `file.path` 为 `undefined`，后端会收到文件名而非完整路径，导致 `VideoFramePipe` 无法打开文件。
-
-- 当前 `frontend/app.js` 第 47 行：`videoFilePath = file.path || file.name;`
-- 解决方案 A（推荐，demo 场景）：改为文件上传接口，后端保存到临时目录后返回路径
-- 解决方案 B：改用 Electron 打包，支持 `file.path`
-- 解决方案 C：用户在 UI 上手动输入绝对路径
-- 负责人：**6 号**
-
-**3. edge-tts 在 pygame 线程内的 asyncio 嵌套问题**
-
-`TTSEngine._speak_thread()` 在新线程中创建新 event loop，内部再调用 `edge_tts.Communicate.stream()`（异步迭代器）。在某些 Windows 环境下，pygame mixer 与线程内 asyncio 的组合可能出现阻塞或卡顿。
-
-- 负责人：**3 号** 在接入真实音频后首先验证此路径是否顺畅
-- 备选方案：将 TTS 合成单独放入 `asyncio` 任务，只将已合成的音频字节交给 pygame 播放线程
-
 ---
 
 ### 🟡 需要人工调优的模块
 
-**4. 动作解析阈值（2 号）**
+**2. 动作解析阈值（2 号）**
 
 `backend/nitrogen/parser.py` 中的意图推断逻辑完全基于设计假设，核心问题：
 
@@ -198,7 +195,7 @@ Demo 前端使用 `file.path`（Electron 特有属性）传递本地文件路径
 - `NAVIGATE` 的分数用 `joystick_mag * 0.5` 与其他按键分数不在同一量纲
 - 需要在 1 号提供真实数据后重新标定
 
-**5. 动作过滤阈值（2 号）**
+**3. 动作过滤阈值（2 号）**
 
 `backend/fast/action_filter.py` 中所有数值均为估算：
 
@@ -210,7 +207,7 @@ COOLDOWNS = { SUDDEN_DODGE: 3.0, ATTACK_WINDOW: 4.0, ... }  # 全部未经实测
 
 在真实游戏视频上运行前，`primary_intent` 的置信度分布未知，`0.75` 可能过高（几乎不触发）或过低（触发太频繁）。
 
-**6. VLM Prompt 质量（4 号）**
+**4. VLM Prompt 质量（4 号）**
 
 `backend/slow/vlm_client.py` 中的 `SYSTEM_PROMPT` 和 user message 构造是初版，尚未经过真实游戏帧测试：
 
@@ -218,14 +215,14 @@ COOLDOWNS = { SUDDEN_DODGE: 3.0, ATTACK_WINDOW: 4.0, ... }  # 全部未经实测
 - 不同触发场景（策略类、状态类、评价类、PATTERN_COMPLETED 总结）的 prompt 分支是否合理
 - `vlm_max_tokens=120` 对应约 40 字，是否在此限制下仍能给出有意义的回答
 
-**7. TTS 音色与语速（3 号）**
+**5. TTS 音色与语速（3 号）**
 
 `backend/config.py` 默认值：`tts_voice = "zh-CN-YunxiNeural"`, `tts_rate = "+20%"`
 
 - 这是初始猜测值，需在真实游戏场景下听感评估
 - 可用中文声音列表：`python -m edge_tts --list-voices | findstr zh-CN`
 
-**8. VAD 参数（5 号）**
+**6. VAD 参数（5 号）**
 
 `backend/asr/handler.py` 中的 VAD 参数对麦克风环境高度敏感：
 
@@ -241,7 +238,7 @@ TTS_MUTE_TAIL_SEC = 0.2   # TTS 结束后额外静默，消除回声尾音
 
 ### 🟢 前端功能待完善（6 号）
 
-**9. 前端 UI 深度优化**
+**7. 前端 UI 深度优化**
 
 当前前端是功能性骨架，以下部分待 6 号完善：
 
@@ -252,35 +249,21 @@ TTS_MUTE_TAIL_SEC = 0.2   # TTS 结束后额外静默，消除回声尾音
 - [ ] 视频区和对话区的比例可调（拖动分割线）
 - [ ] 拖动进度条时的加载中状态（seek 期间的过渡体验）
 
-**10. 麦克风权限与文件路径（6 号）**
+**8. 浏览器安全上下文限制**
 
-见问题 2（文件路径）。另外浏览器麦克风权限需要 HTTPS 或 localhost，目前 localhost 场景没问题，如果部署到内网其他机器访问需要配置 HTTPS。
+麦克风权限和 `canvas.toBlob()` 均需要 HTTPS 或 localhost。目前 localhost 场景正常，若部署到内网其他机器访问，需要配置 HTTPS（如 nginx 反代 + 自签名证书）。
 
 ---
 
 ### 🔵 架构层面的已知局限
 
-**11. VideoFramePipe 与视频播放不真正同步**
-
-当前方案是 HTML5 video 在前端播放，后端独立用 `cv2.VideoCapture` 重新读取同一文件。两者的时间轴通过前端 `seek` 事件同步，但正常播放过程中存在累积误差（取决于 cv2 读取速度与 HTML5 播放速度是否一致）。
-
-长期方案：前端视频播放每隔 1 秒发送一次 `{"type": "sync", "time": currentTime}`，后端实时矫正。或改为后端推流、前端展示。
-
-**12. 单用户 Demo 架构**
+**9. 单用户 Demo 架构**
 
 `backend/main.py` 中 `_session` 是全局变量，只支持单个会话。多人同时访问会互相覆盖。Demo 场景够用，正式部署需要会话隔离。
 
-**13. Whisper 识别在 ASR 线程中阻塞**
+**10. TTS 播放完成时序精度**
 
-`ASRHandler._flush()` 调用 `whisper.transcribe()` 是同步阻塞调用，识别时间取决于语音长度（base 模型约 0.5-2 秒）。识别期间无法处理新的音频块，可能漏掉紧接着的语音。
-
-改进方案：在独立线程池中执行 transcribe，VAD 继续在主线程运行。
-
-**14. TTS 音频只在服务端播放**
-
-当前 TTS 在后端机器的扬声器上播放（`pygame`）。如果后端和用户不在同一台机器，用户听不到声音。
-
-解决方案：将合成的音频数据通过 WebSocket 发送给前端，由前端 Web Audio API 播放。需要修改 `TTSEngine` 增加 `on_audio_data` 回调，以及前端增加 `AudioContext` 播放逻辑。
+`TTSEngine` 通过 pydub 估算 MP3 时长（+300ms 缓冲）来触发 `on_complete`，估算值与前端实际播放完成时刻之间仍有偏差（网络抖动、浏览器解码延迟等）。前端发送的 `tts_done` 消息目前未被后端响应（仅作记录），若需精确联动可将其接入 `_on_complete` 流程。
 
 ---
 
@@ -290,8 +273,8 @@ TTS_MUTE_TAIL_SEC = 0.2   # TTS 结束后额外静默，消除回声尾音
 |------|-----------|---------|
 | 1 号 | 跑通 `scripts/serve.py`，验证 ZMQ 响应格式，打印真实 `j_left/buttons` 数值分布 | `scripts/serve.py`, `backend/nitrogen/client.py` |
 | 2 号 | 等 1 号数据后，校准 `parser.py` 意图推断，调整 `action_filter.py` 阈值 | `backend/nitrogen/parser.py`, `backend/fast/action_filter.py` |
-| 3 号 | 测试 TTS 线程播放是否正常（问题 3），选音色，调语速 | `backend/tts/engine.py`, `backend/config.py` |
+| 3 号 | 选音色（`tts_voice`），调语速（`tts_rate`），逐条朗读快通道模板文本 | `backend/tts/engine.py`, `backend/config.py`, `backend/fast/templates.py` |
 | 4 号 | 用真实游戏帧 + 感知信号调用 Claude，评估初版 prompt，迭代 | `backend/slow/vlm_client.py` |
 | 5 号 | 在真实麦克风环境下测 VAD 参数，测 mute 防回声效果 | `backend/asr/handler.py`, `backend/config.py` |
-| 6 号 | 解决文件路径问题（问题 2），深化前端 UI | `frontend/app.js`, `frontend/index.html` |
+| 6 号 | 深化前端 UI（文件路径问题已不存在，可直接开始 UI 优化） | `frontend/app.js`, `frontend/style.css` |
 | 7 号 | 选视频（可立即开始），等各模块就绪后做端到端集成联调 | `backend/main.py`，Demo 视频 |

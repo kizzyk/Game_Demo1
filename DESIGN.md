@@ -1,6 +1,6 @@
 # NitroGen + VLM 游戏语音教练 Demo 设计文档
 
-> 版本 0.1 | 2026-06-25
+> 版本 0.2 | 2026-06-25（架构修订：Fix 11/13/14）
 
 ---
 
@@ -28,10 +28,11 @@
 
 ### 1.3 Demo 形态
 
-- **输入**：本地游戏视频文件（.mp4/.avi 等）
+- **输入**：本地游戏视频文件（.mp4/.avi 等），在浏览器内播放
+- **帧采集**：前端 canvas 以 10fps 截取视频帧 → WebSocket 推送给后端 → NitroGen 推理
 - **界面**：Web 页面，左侧播放视频，右侧显示语音文字记录
-- **交互**：用户点击麦克风按钮或按住空格键说话，系统实时回答
-- **输出**：TTS 语音播报 + 界面字幕同步显示
+- **交互**：持续收音，用户开口即可提问，无需按任何按钮
+- **输出**：TTS 语音通过浏览器扬声器播放 + 界面字幕同步显示
 
 ---
 
@@ -44,37 +45,39 @@
 │  ┌──────────────────┐    ┌──────────────────────────────────────┐   │
 │  │   Video Player   │    │         Conversation Panel           │   │
 │  │  (HTML5 video)   │    │  [字幕流 + 角色标签 + 时间戳]         │   │
-│  └──────────────────┘    └──────────────────────────────────────┘   │
-│                                                                      │
-│  ┌────────────────────────────────────────────────────────────────┐ │
-│  │  Status Bar: [NitroGen ●] [VLM ●] [TTS ▶] [麦克风 🎤]         │ │
-│  └────────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │ WebSocket (ws://localhost:8000/ws)
-┌──────────────────────────────▼──────────────────────────────────────┐
-│                        Backend (Python / FastAPI)                    │
-│                                                                      │
-│  ┌────────────────┐    ┌──────────────────┐    ┌─────────────────┐  │
-│  │  VideoFramePipe│    │  ActionFilter &  │    │  TTSQueue       │  │
-│  │  帧提取 + 同步  │    │  EventDetector   │    │  单队列优先级    │  │
-│  └───────┬────────┘    └────────┬─────────┘    └────────┬────────┘  │
-│          │ PIL Image            │ GameEvent              │           │
-│          ▼                      ▼                        ▼           │
-│  ┌───────────────┐    ┌──────────────────┐    ┌─────────────────┐   │
-│  │ NitroGen      │    │  FastPath        │    │  SlowPath       │   │
-│  │ Client (ZMQ)  │    │  模板引擎         │    │  VLM Client     │   │
-│  │               │    │  → 关键提示词     │    │  (Claude API)   │   │
-│  └───────────────┘    └──────────────────┘    └─────────────────┘   │
-│                                                                      │
-│  ┌────────────────────────────────────────────────────────────────┐  │
-│  │  ASR Handler (Whisper)  ←──── 用户麦克风输入                    │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
-                               │ ZMQ REQ/REP
-┌──────────────────────────────▼──────────────────────────────────────┐
-│                      NitroGen Server (serve.py)                      │
-│                      Linux / GPU 机器                                │
-└─────────────────────────────────────────────────────────────────────┘
+│  └────────┬─────────┘    └──────────────────────────────────────┘   │
+│           │ canvas 10fps截帧                                          │
+│  ┌────────▼─────────────────────────────────────────────────────┐    │
+│  │  Status Bar: [NitroGen ●] [VLM ●] [TTS ▶] [麦克风 🎤]        │    │
+│  └──────────────────────────────────────────────────────────────┘    │
+└────────┬────────────────────────────────┬────────────────────────────┘
+         │ WS binary 0x02 (JPEG帧+时间)   │ WS binary 0x01 (PCM音频)
+         │ WS JSON (seek/pause/resume)    │ WS binary (MP3 TTS音频 ←)
+┌────────▼────────────────────────────────▼────────────────────────────┐
+│                        Backend (Python / FastAPI)                     │
+│                                                                       │
+│  ┌────────────────┐    ┌──────────────────┐    ┌─────────────────┐   │
+│  │  FrameBuffer   │    │  ActionFilter &  │    │  TTSQueue       │   │
+│  │  接收前端推帧   │    │  EventDetector   │    │  单队列优先级    │   │
+│  └───────┬────────┘    └────────┬─────────┘    └────────┬────────┘   │
+│          │ PIL Image            │ GameEvent              │ on_audio   │
+│          ▼                      ▼                        ▼  _data()  │
+│  ┌───────────────┐    ┌──────────────────┐    ┌─────────────────┐    │
+│  │ NitroGen      │    │  FastPath        │    │  TTSEngine      │    │
+│  │ Client (ZMQ)  │    │  模板引擎         │    │  edge-tts合成   │    │
+│  │               │    │  → 关键提示词     │    │  → MP3 bytes    │    │
+│  └───────────────┘    └──────────────────┘    └─────────────────┘    │
+│                                                                       │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │  ASR Handler (Whisper)  ←──── 用户麦克风输入                     │ │
+│  │  [VAD线程]  [转写线程 queue]  → on_utterance()                   │ │
+│  └─────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────┬────────────────────────────────────┘
+                                   │ ZMQ REQ/REP
+┌──────────────────────────────────▼────────────────────────────────────┐
+│                      NitroGen Server (serve.py)                        │
+│                      Linux / GPU 机器                                  │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.1 进程划分
@@ -83,7 +86,7 @@
 |------|----------|------|
 | `serve.py` | Linux + GPU | NitroGen 模型推理，ZMQ REP |
 | `backend/main.py` | Windows / Python | 主控进程，FastAPI + WebSocket |
-| Browser | 任意 | 前端展示 + 麦克风采集 |
+| Browser | 任意 | 视频播放 + canvas 帧捕获 + 麦克风采集 + TTS 音频播放 |
 
 ---
 
@@ -96,7 +99,8 @@ demo/
 │   ├── config.py                # 全局配置
 │   │
 │   ├── video/
-│   │   └── frame_pipe.py        # 视频帧提取，帧率控制，与视频播放同步
+│   │   ├── frame_buffer.py      # ★ 接收前端推帧（Fix 11），供 NitroGen 读取
+│   │   └── frame_pipe.py        # 备用：cv2 本地读帧（当前未被主流程使用）
 │   │
 │   ├── nitrogen/
 │   │   ├── client.py            # ZMQ 客户端，封装 predict()
@@ -114,10 +118,10 @@ demo/
 │   │
 │   ├── tts/
 │   │   ├── queue.py             # 优先级 TTS 队列，打断机制
-│   │   └── engine.py            # TTS 后端封装（edge-tts）
+│   │   └── engine.py            # TTS 合成，MP3 bytes 发往前端（Fix 14）
 │   │
 │   └── asr/
-│       └── handler.py           # Whisper 语音识别，VAD
+│       └── handler.py           # Whisper 语音识别，VAD，独立转写线程（Fix 13）
 │
 ├── frontend/
 │   ├── index.html
@@ -135,57 +139,53 @@ demo/
 
 ## 4. 核心模块详细设计
 
-### 4.1 VideoFramePipe（视频帧管道）
+### 4.1 FrameBuffer（前端推帧缓冲，Fix 11）
 
-**职责**：从视频文件按帧提取图像，与视频播放时间轴保持同步，向下游推送帧。
+**职责**：接收前端通过 WebSocket 推送的视频帧，缓存最新一帧供 NitroGen 读取。
+接口与原 `VideoFramePipe` 完全兼容，`NitroGenClient` 无需改动。
 
-**关键设计**：
+**为什么改为前端推帧？**
+
+原方案后端用 `cv2.VideoCapture` 独立重读视频文件，与前端 HTML5 播放器时间轴不同步，
+正常播放会产生累积误差，seek 后也需要额外同步机制。
+改为前端推帧后，NitroGen 接收的永远是用户当前看到的那一帧，时间戳精确。
+
+**前端帧捕获流程（`frontend/app.js`）**：
 
 ```
-视频时间轴 (30fps 示例)
-─────────────────────────────────────────────────────→ 时间
-T=0    T=33ms  T=66ms  T=100ms ...
-
-NitroGen 推理周期 ~200ms（含16步去噪）
-─────────────────────────────────────────────────────→
-[    推理中    ][    推理中    ][    推理中    ] ...
-
-解决方案：帧提取速率 = 视频帧率，但推理是异步的
-每帧图像写入帧队列，NitroGen 从队列头取最新帧推理
+ws.onopen 后
+  → setInterval(100ms)
+      → captureCtx.drawImage(videoPlayer, 0, 0, 256, 256)
+      → canvas.toBlob(JPEG, quality=0.85)
+      → 构造 WebSocket 二进制消息：
+          [byte 0x02][float64 LE 视频时间][JPEG bytes]
+      → ws.send(msg)
 ```
+
+**后端接收（`backend/main.py` WebSocket 处理）**：
 
 ```python
-# backend/video/frame_pipe.py
-
-class VideoFramePipe:
-    def __init__(self, video_path: str, target_fps: float = 10.0):
-        """
-        target_fps: 向 NitroGen 发送的帧率
-        不需要 30fps 全量推理，10fps 足够捕捉动作变化
-        降低推理负载，同时不影响意图检测质量
-        """
-        self.cap = cv2.VideoCapture(video_path)
-        self.native_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        self.target_fps = target_fps
-        self.frame_interval = 1.0 / target_fps
-
-        # 最新帧（NitroGen 永远取最新帧，不排队等待）
-        self.latest_frame: Optional[PIL.Image] = None
-        self.latest_frame_time: float = 0.0
-        self.video_position: float = 0.0  # 当前视频时间（秒）
-
-    def start(self, on_frame_callback):
-        """后台线程，按 target_fps 推帧"""
-        ...
-
-    def seek(self, time_sec: float):
-        """前端拖动进度条时调用"""
-        ...
+msg_type  = data[0]           # 0x02
+video_time = struct.unpack_from("<d", data, 1)[0]  # 8字节 float64
+jpeg_bytes = data[9:]
+session.on_video_frame(jpeg_bytes, video_time)
+# → frame_buffer.push(jpeg_bytes, video_time)
 ```
 
-**关键参数**：`target_fps = 10`
-- NitroGen 推理 ~200ms/chunk，10fps = 100ms/帧，基本对齐
-- 比 30fps 节省 3 倍推理量，动作检测无明显损失
+**FrameBuffer 接口**（`backend/video/frame_buffer.py`）：
+
+```python
+class FrameBuffer:
+    latest_frame:   Optional[PIL.Image]  # NitroGenClient 读此属性
+    video_position: float                # 当前视频时间（秒）
+    duration_sec:   float                # 由前端 video_ready 消息设置
+
+    def push(self, jpeg_bytes: bytes, video_time: float): ...
+    def pause(self) / resume(self): ...
+    def seek(self, _time): ...  # 清空 latest_frame，防止旧帧重复推理
+```
+
+> **注**：`backend/video/frame_pipe.py`（cv2 本地读帧）保留为备用，当前主流程不使用。
 
 ---
 
@@ -666,202 +666,126 @@ NitroGen 当前感知：
 
 ---
 
-### 4.6 TTS 队列与调度
+### 4.6 TTS 队列与调度（Fix 14）
 
 **核心约束**：同一时间只能播报一条语音。
 
+**Fix 14 变化**：TTS 不再在服务端 pygame 播放，改为将合成的 MP3 bytes 通过 WebSocket 发送给前端，由浏览器 Audio API 播放。`on_complete` 改为基于音频时长估算定时触发（不再等待本地播放结束）。
+
+```
+TTS 播报新流程：
+
+TTSQueue._speak_next()
+  → ASRHandler.mute()
+  → TTSEngine.speak_async(text, on_complete)
+      ├─ [合成线程] edge-tts 合成 → MP3 bytes
+      ├─ on_audio_data(mp3_bytes) → WebSocket.send_bytes() → 前端播放
+      └─ 估算时长（pydub）→ Timer(duration, on_complete)
+                                     ↓
+                              TTSQueue._on_complete()
+                                → ASRHandler.unmute()
+                                → Timer(inter_gap, _speak_next)
+```
+
+优先级与过期规则不变：
+
 ```python
-# backend/tts/queue.py
-
-from enum import IntEnum
-
 class Priority(IntEnum):
-    USER_ANSWER  = 0   # 最高：用户提问的回答
-    FAST_HINT    = 1   # 高：快通道关键提示
-    SLOW_ADVICE  = 2   # 中：慢通道建议
-    SLOW_SUMMARY = 3   # 低：操作段总结
+    USER_ANSWER  = 0   # 最高，打断当前播报
+    FAST_HINT    = 1   # 2 秒内未播则丢弃
+    SLOW_ADVICE  = 2   # 8 秒内未播则丢弃
+    SLOW_SUMMARY = 3   # 15 秒内未播则丢弃
+```
 
-@dataclass(order=True)
-class TTSItem:
-    priority:  Priority
-    enqueue_time: float
-    text:      str = field(compare=False)
-    expire_sec: float = field(compare=False)  # 超时丢弃
+**TTSEngine 关键变化**（`backend/tts/engine.py`）：
 
-class TTSQueue:
-    MAX_AGE = {
-        Priority.USER_ANSWER:  30.0,  # 用户回答不丢弃
-        Priority.FAST_HINT:     2.0,  # 超过2秒的快提示直接丢
-        Priority.SLOW_ADVICE:   8.0,
-        Priority.SLOW_SUMMARY: 15.0,
+```python
+class TTSEngine:
+    # Fix 14：不再有 pygame 播放，改为回调
+    on_audio_data: Optional[Callable[[bytes], None]] = None
+
+    def speak_async(self, text, on_complete=None):
+        # 1. 合成 → MP3 bytes
+        # 2. on_audio_data(bytes)  ← 触发 WebSocket 广播
+        # 3. 估算时长 → Timer(duration, on_complete)
+        ...
+
+    @staticmethod
+    def _estimate_duration(audio_data: bytes) -> float:
+        # 优先用 pydub 精确解析，+0.3s 缓冲
+        seg = AudioSegment.from_mp3(io.BytesIO(audio_data))
+        return len(seg) / 1000.0 + 0.3
+```
+
+**前端 TTS 播放**（`frontend/app.js`）：
+
+```javascript
+ws.onmessage = e => {
+    if (e.data instanceof ArrayBuffer) {
+        // 服务端→客户端 binary = TTS MP3 音频
+        const blob  = new Blob([e.data], { type: 'audio/mpeg' });
+        const audio = new Audio(URL.createObjectURL(blob));
+        audio.onended = () => ws.send(JSON.stringify({type:'tts_done'}));
+        audio.play();
     }
-
-    def __init__(self, tts_engine):
-        self._heap: list = []
-        self._lock = threading.Lock()
-        self._tts = tts_engine
-        self._is_speaking = False
-        self._current_item: Optional[TTSItem] = None
-
-    def push(self, text: str, priority: Priority):
-        item = TTSItem(
-            priority=priority,
-            enqueue_time=time.time(),
-            text=text,
-            expire_sec=self.MAX_AGE[priority],
-        )
-        with self._lock:
-            heapq.heappush(self._heap, item)
-
-        # 如果是用户回答，打断当前播报
-        if priority == Priority.USER_ANSWER and self._is_speaking:
-            self._interrupt()
-            self._speak_next()
-        elif not self._is_speaking:
-            self._speak_next()
-
-    def _speak_next(self):
-        now = time.time()
-        with self._lock:
-            # 弹出并丢弃过期 item
-            while self._heap:
-                item = heapq.heappop(self._heap)
-                age = now - item.enqueue_time
-                if age <= item.expire_sec:
-                    self._current_item = item
-                    break
-            else:
-                return
-
-        self._is_speaking = True
-        self._tts.speak_async(
-            item.text,
-            on_complete=self._on_complete
-        )
-
-    def _on_complete(self):
-        self._is_speaking = False
-        self._current_item = None
-        # 两条语音之间加 0.8 秒间隔，避免轰炸感
-        threading.Timer(0.8, self._speak_next).start()
-
-    def _interrupt(self):
-        self._tts.stop()
-        self._is_speaking = False
+    // ...JSON 事件处理
+};
 ```
 
 ---
 
-### 4.7 ASR 用户语音输入
+### 4.7 ASR 用户语音输入（Fix 13）
 
 系统持续收音，VAD 检测到用户说话结束后触发 Whisper 识别，识别结果直接触发慢系统回复。无需任何按钮。
 
-**关键问题：TTS 播报时麦克风会拾取扬声器声音，导致 ASR 把 TTS 输出误识别为用户提问。**
+**Fix 13 变化**：`_flush()` 改为非阻塞，将音频放入 `Queue` 后立即返回。独立的转写线程持续从队列消费，运行 `whisper.transcribe()`。VAD 与 Whisper 并发运行，不会漏捕连续语音。
 
-解决方案：TTS 播报期间暂停 VAD 检测（不关闭麦克风，只是不处理音频），播报结束后恢复。加上 200ms 的尾部缓冲，避免尾音残留误触发。
-
-```python
-# backend/asr/handler.py
-
-class ASRHandler:
-    """
-    持续收音 + VAD 检测，自动识别用户提问
-    TTS 播报期间暂停 VAD，避免回声误触发
-    """
-
-    # VAD 参数
-    SILENCE_THRESHOLD    = 300    # 振幅静音阈值
-    SPEECH_MIN_SEC       = 0.5    # 最短有效语音（过滤误触）
-    SILENCE_END_SEC      = 1.2    # 静音多久判定说话结束
-    TTS_MUTE_TAIL_SEC    = 0.2    # TTS 结束后额外静默时间（消除尾音）
-
-    def __init__(self, model_size: str = "base", language: str = "zh"):
-        self.model = whisper.load_model(model_size)
-        self.language = language
-        self.on_utterance: Optional[Callable[[str], None]] = None
-
-        self._muted = False           # TTS 播报期间置 True
-        self._speaking = False        # 用户正在说话
-        self._audio_buffer: list = []
-        self._speech_frames  = 0
-        self._silence_frames = 0
-
-    # ── TTS 联动 ─────────────────────────────────────────────
-    def mute(self):
-        """TTSQueue 开始播报时调用"""
-        self._muted = True
-        self._reset_vad()
-
-    def unmute(self):
-        """TTSQueue 播报结束后调用（含 TTS_MUTE_TAIL_SEC 延迟）"""
-        threading.Timer(self.TTS_MUTE_TAIL_SEC, self._do_unmute).start()
-
-    def _do_unmute(self):
-        self._muted = False
-
-    # ── 音频处理 ─────────────────────────────────────────────
-    def process_audio_chunk(self, audio_bytes: bytes, sample_rate: int = 16000):
-        """
-        前端持续通过 WebSocket 发送 PCM 音频块（约 100ms/块）
-        后端在此处做 VAD + 缓冲
-        """
-        if self._muted:
-            return
-
-        audio = np.frombuffer(audio_bytes, dtype=np.int16)
-        amplitude = np.abs(audio).mean()
-
-        frames_per_sec = sample_rate / len(audio)
-        silence_limit  = int(self.SILENCE_END_SEC * frames_per_sec)
-        speech_min     = int(self.SPEECH_MIN_SEC  * frames_per_sec)
-
-        if amplitude > self.SILENCE_THRESHOLD:
-            self._speaking = True
-            self._silence_frames = 0
-            self._speech_frames += 1
-            self._audio_buffer.append(audio_bytes)
-        elif self._speaking:
-            self._silence_frames += 1
-            self._audio_buffer.append(audio_bytes)
-
-            if self._silence_frames >= silence_limit:
-                if self._speech_frames >= speech_min:
-                    self._flush()
-                self._reset_vad()
-
-    def _flush(self):
-        """将缓冲区音频送入 Whisper"""
-        raw = b"".join(self._audio_buffer)
-        arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-        result = self.model.transcribe(arr, language=self.language, fp16=False)
-        text = result["text"].strip()
-        if text and self.on_utterance:
-            self.on_utterance(text)
-
-    def _reset_vad(self):
-        self._speaking      = False
-        self._audio_buffer  = []
-        self._speech_frames  = 0
-        self._silence_frames = 0
+```
+WebSocket 协程          VAD 线程（即 WebSocket 协程）       转写线程
+       │                          │                          │
+       │── process_audio_chunk() →│                          │
+       │                          │── amplitude > threshold  │
+       │                          │── 静音超时               │
+       │                          │── _flush()               │
+       │                          │    └─ queue.put(arr) →→→→│── transcribe()
+       │                          │── _reset_vad()           │── on_utterance(text)
+       │                          │   （立即可捕新语音）       │
 ```
 
-**TTSQueue 需要在播报生命周期里通知 ASRHandler：**
-
 ```python
-# backend/tts/queue.py（补充）
+class ASRHandler:
+    # VAD 参数（5号调优）
+    SILENCE_THRESHOLD = 300
+    SPEECH_MIN_SEC    = 0.5
+    SILENCE_END_SEC   = 1.2
+    TTS_MUTE_TAIL_SEC = 0.2
 
-class TTSQueue:
-    def __init__(self, tts_engine, asr_handler: ASRHandler):
-        ...
-        self._asr = asr_handler
+    def __init__(self, ...):
+        # Fix 13：独立转写线程
+        self._transcription_queue = queue.Queue(maxsize=4)
+        self._transcription_thread = threading.Thread(
+            target=self._transcription_loop, daemon=True
+        )
+        self._transcription_thread.start()
 
-    def _speak_next(self):
-        ...
-        self._asr.mute()          # 开始播报前静音 ASR
-        self._tts.speak_async(item.text, on_complete=self._on_complete)
+    def _flush(self):
+        """非阻塞：仅入队，立即重置 VAD"""
+        arr = np.frombuffer(b"".join(self._audio_buffer), dtype=np.int16)\
+                .astype(np.float32) / 32768.0
+        self._transcription_queue.put_nowait(arr)   # 不阻塞
 
-    def _on_complete(self):
-        self._asr.unmute()        # 播报结束后恢复 ASR（含尾部缓冲）
+    def _transcription_loop(self):
+        """独立线程：阻塞在队列，运行 Whisper"""
+        while True:
+            arr = self._transcription_queue.get()
+            if arr is None: break
+            result = self.model.transcribe(arr, language=self.language, fp16=False)
+            text = result["text"].strip()
+            if text and self.on_utterance:
+                self.on_utterance(text)
+```
+
+**TTS 播报期间的 mute/unmute 机制不变**（详见 Fix 14 流程图）。
         self._is_speaking = False
         threading.Timer(0.8, self._speak_next).start()
 
@@ -1156,8 +1080,8 @@ async def on_video_seek(self, new_time: float):
     # 风险：旧位置问答对新位置语义可能不连贯
     # 折中：保留历史，VLM 本身能从画面感知当前位置，不会被旧对话误导太多
 
-    # Step 7：视频重新定位
-    self.frame_pipe.seek(new_time)
+    # Step 7：帧缓冲重置（清空旧帧，Fix 11）
+    self.frame_buffer.seek(new_time)
 
     # Step 8：恢复推理
     self.nitrogen_client.resume()
@@ -1174,6 +1098,7 @@ async def on_video_seek(self, new_time: float):
 | `ConversationHistory` | **保留** | 用户可能 seek 后追问旧话题 |
 | `TTS 队列` | **清空并停止** | 旧位置的播报内容已过时 |
 | `VLM in-flight/pending` | **取消** | 旧位置的 VLM 请求结果已过时 |
+| `FrameBuffer.latest_frame` | **清空** | 防止旧帧被 NitroGen 重复推理 |
 
 ---
 
@@ -1183,58 +1108,81 @@ async def on_video_seek(self, new_time: float):
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/upload` | POST | 上传视频文件，返回 `video_id` |
-| `/start/{video_id}` | POST | 开始分析，建立 WebSocket 连接 |
-| `/stop` | POST | 停止分析 |
+| `/start` | POST | 启动分析会话（无需传视频路径，Fix 11） |
+| `/stop`  | POST | 停止分析 |
 
-### 6.2 WebSocket 消息协议
+### 6.2 WebSocket 消息协议（Fix 11、14 后更新）
 
-**后端 → 前端**（JSON）：
+#### 二进制消息（客户端 → 服务端）
+
+```
+byte[0] = 0x01  PCM 音频（麦克风，用于 ASR）
+          byte[1:] = PCM int16 little-endian，16kHz，约 100ms/块
+
+byte[0] = 0x02  视频帧（canvas 截图，用于 NitroGen，Fix 11）
+          byte[1:9] = float64 little-endian（视频当前时间，秒）
+          byte[9:]  = JPEG bytes，256×256
+```
+
+#### 二进制消息（服务端 → 客户端）
+
+```
+TTS 音频 MP3 bytes（Fix 14，无类型前缀，服务端→客户端仅此一种 binary）
+前端收到 ArrayBuffer 时直接当 MP3 播放
+```
+
+#### JSON 消息（客户端 → 服务端）
 
 ```json
-// 语音播报
+// 视频元数据（视频加载后立即发送，Fix 11）
+{ "type": "video_ready", "duration": 120.5 }
+
+// 视频进度同步
+{ "type": "seek",     "time": 12.5 }
+
+// 暂停/继续
+{ "type": "playback", "action": "pause" | "resume" }
+
+// 视频自然结束
+{ "type": "video_ended" }
+
+// TTS 播放完毕（精确时序信号，Fix 14）
+{ "type": "tts_done" }
+```
+
+#### JSON 消息（服务端 → 客户端）
+
+```json
+// 语音播报开始（同步显示字幕）
 {
   "type": "tts",
-  "channel": "fast" | "slow" | "user_answer",
+  "channel": "fast" | "slow" | "user_answer" | "user",
   "text": "向左闪！",
-  "video_time": 5.3
+  "video_time": 5.3,
+  "playing": true
 }
+
+// 语音播报结束
+{ "type": "tts_end" }
 
 // 系统状态
-{
-  "type": "status",
-  "nitrogen_active": true,
-  "vlm_processing": false,
-  "tts_playing": true
-}
+{ "type": "status", "state": "started" | "video_ready", "duration": 120.5 }
 
-// NitroGen 感知信号（用于 Debug 面板）
+// NitroGen 感知信号（调试面板）
 {
   "type": "perception",
   "intent": "DODGE",
   "confidence": 0.87,
   "direction": "LEFT",
-  "horizon": ["DODGE×6", "ATTACK×8", "NAVIGATE×2"]
-}
-```
-
-**前端 → 后端**（二进制 + JSON）：
-
-```json
-// 麦克风音频（二进制帧，PCM 16bit 16kHz）
-// WebSocket binary frame
-
-// 视频播放进度同步
-{
-  "type": "seek",
-  "time": 12.5
+  "horizon": ["DODGE×6", "ATTACK×8", "NAVIGATE×2"],
+  "video_time": 5.3
 }
 
-// 暂停/继续
-{
-  "type": "playback",
-  "action": "pause" | "resume"
-}
+// seek 完成
+{ "type": "seek_done", "time": 12.5 }
+
+// 视频结束
+{ "type": "video_ended" }
 ```
 
 ### 6.3 前端页面结构
