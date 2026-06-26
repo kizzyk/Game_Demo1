@@ -21,7 +21,8 @@ const STEPS = [
   { id: 'perception',   name: 'NitroGen 感知回传',        critical: false },
 ];
 
-const TTS_TIMEOUT_MS = 25000;
+const PROBE_TTS_TEXT = '探针测试，链路正常。';
+const TTS_TIMEOUT_MS = 45000;
 const PERCEPTION_TIMEOUT_MS = 8000;
 
 let probeWs = null;
@@ -150,6 +151,52 @@ function waitWsJson(ws, predicate, timeoutMs) {
         }
       } catch { /* ignore */ }
     }
+    ws.addEventListener('message', onMsg);
+  });
+}
+
+/**
+ * 在 POST /probe/tts-echo 之前挂上监听，避免服务端瞬时回推 tts/MP3 时丢消息。
+ */
+function waitTtsRoundtrip(ws, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let ttsJson = null;
+
+    const timer = setTimeout(() => {
+      ws.removeEventListener('message', onMsg);
+      const hint = ttsJson
+        ? `已收到 tts #${ttsJson.utterance_id}，未收到匹配 MP3（检查 edge-tts 网络）`
+        : '未收到 tts JSON（队列忙、edge-tts 不可达或消息在监听前已发出）';
+      reject(new Error(`TTS 往返超时 (${timeoutMs}ms)：${hint}`));
+    }, timeoutMs);
+
+    function cleanup() {
+      clearTimeout(timer);
+      ws.removeEventListener('message', onMsg);
+    }
+
+    function onMsg(e) {
+      if (typeof e.data === 'string') {
+        try {
+          const msg = JSON.parse(e.data);
+          if (
+            msg.type === 'tts'
+            && msg.utterance_id != null
+            && msg.text === PROBE_TTS_TEXT
+          ) {
+            ttsJson = msg;
+          }
+        } catch { /* ignore */ }
+        return;
+      }
+      if (!(e.data instanceof ArrayBuffer) || !ttsJson) return;
+      const parsed = parseTTSBinaryFrame(e.data);
+      if (parsed && parsed.utteranceId === ttsJson.utterance_id) {
+        cleanup();
+        resolve({ ttsJson, binary: parsed });
+      }
+    }
+
     ws.addEventListener('message', onMsg);
   });
 }
@@ -309,30 +356,20 @@ async function runAllProbes() {
       return `pcm=${pcm.byteLength - 1}B`;
     },
     'tts-roundtrip': async () => {
+      const roundtrip = waitTtsRoundtrip(probeWs, TTS_TIMEOUT_MS);
       const r = await fetch('/probe/tts-echo', { method: 'POST' });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
 
-      const ttsJson = await waitWsJson(
-        probeWs, m => m.type === 'tts' && m.utterance_id != null, TTS_TIMEOUT_MS,
-      );
+      const { ttsJson, binary } = await roundtrip;
       const uid = ttsJson.utterance_id;
-
-      const binary = await waitWsBinary(
-        probeWs,
-        buf => {
-          const p = parseTTSBinaryFrame(buf);
-          return p && p.utteranceId === uid ? p : null;
-        },
-        TTS_TIMEOUT_MS,
-      );
 
       if (!binary.mp3 || binary.mp3.byteLength < 16) {
         throw new Error(`MP3 过短 (${binary.mp3?.byteLength || 0}B)`);
       }
 
       probeWs.send(JSON.stringify({ type: 'tts_done', utterance_id: uid }));
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(res => setTimeout(res, 200));
       return `utterance_id=${uid}, mp3=${binary.mp3.byteLength}B`;
     },
     observer: async () => {

@@ -86,4 +86,4 @@ class TestProbeEndpoints:
         resp = client.post("/probe/tts-echo")
         assert resp.status_code == 200
         gs.tts_queue.push.assert_called_once()
-        assert gs.tts_queue.push.call_args[0][1] == Priority.FAST_HINT
+        assert gs.tts_queue.push.call_args[0][1] == Priority.USER_ANSWER

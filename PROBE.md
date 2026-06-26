@@ -105,7 +105,7 @@ python run.py
 | `health` / `status` | 后端未启动或端口不对 |
 | `start` | GameSession 初始化异常（依赖缺失、配置错误） |
 | `ws-register` | 防火墙、反向代理未配置 WebSocket |
-| `tts-roundtrip` | edge-tts 无法访问外网、合成超时 |
+| `tts-roundtrip` | edge-tts 无法访问外网、合成超时；或探针在 POST 之后才监听 WS 导致丢消息（已修复） |
 | `perception` | NitroGen ZMQ 服务未启动或地址配置错误（**非关键**，显示警告） |
 
 ---

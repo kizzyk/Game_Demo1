@@ -528,7 +528,8 @@ async def probe_tts_echo():
             content={"error": "分析会话未运行，请先通过探针或 /start 启动"},
         )
     text = "探针测试，链路正常。"
-    _session.tts_queue.push(text, Priority.FAST_HINT)
+    # USER_ANSWER：抢占队列并打断当前播报，避免 FAST_HINT 2s 过期导致探针永远等不到 tts
+    _session.tts_queue.push(text, Priority.USER_ANSWER)
     return {"status": "queued", "text": text}
 
 
