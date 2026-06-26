@@ -67,6 +67,10 @@ async def call_vlm(
 ) -> str:
     cfg = cfg or get_config()
     provider = vlm_provider(cfg)
+    logger.info(
+        "VLM route: provider=%s model=%s event=%s",
+        provider, cfg.vlm_model, event.type.value,
+    )
 
     if provider == "mock":
         logger.info("VLM mock mode: %s", event.type.value)

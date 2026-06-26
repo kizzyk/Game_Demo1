@@ -45,6 +45,10 @@ let wsReconnectAttempts = 0;
 const WS_RECONNECT_BASE_MS = 1000;
 const WS_RECONNECT_MAX_MS = 15000;
 const dismissedUtteranceIds = new Set();
+let backendPreparePromise = null;
+let timelineScanPromise = null;
+let hiddenScanVideo = null;
+let hiddenScanCanvas = null;
 
 const clientMode = new URLSearchParams(location.search).get('mode') === 'observer'
   ? 'observer'
@@ -67,6 +71,7 @@ const ttsStatus     = $('tts-status');
 const micStatus     = $('mic-status');
 const captureCanvas = $('capture-canvas');   // Fix 11
 const captureCtx    = captureCanvas.getContext('2d');
+const chkVideoAudio = $('chk-video-audio');
 
 // ── 文件选择 ──────────────────────────────────────────────────────────
 fileInput.addEventListener('change', e => {
@@ -77,6 +82,12 @@ fileInput.addEventListener('change', e => {
   playerArea.style.display = 'flex';
 
   videoPlayer.src = URL.createObjectURL(file);
+  // 默认静音游戏原声，避免扬声器串音导致收音变差（可手动开启）
+  videoPlayer.muted = true;
+  if (chkVideoAudio) chkVideoAudio.checked = false;
+  backendPreparePromise = null;
+  timelineScanPromise = null;
+  updateStartButtonState();
 });
 
 function canvasToDataUrl(canvas) {
@@ -91,36 +102,52 @@ function canvasToDataUrl(canvas) {
   });
 }
 
-function waitVideoSeeked() {
+function waitVideoSeeked(videoEl) {
   return new Promise(resolve => {
-    videoPlayer.addEventListener('seeked', () => resolve(), { once: true });
+    videoEl.addEventListener('seeked', () => resolve(), { once: true });
   });
 }
 
-/** 从视频均匀抽帧 → 后端 mock NitroGen → 关键动作 JSON */
+function getHiddenScanVideo() {
+  if (!hiddenScanVideo) {
+    hiddenScanVideo = document.createElement('video');
+    hiddenScanVideo.muted = true;
+    hiddenScanVideo.playsInline = true;
+    hiddenScanVideo.preload = 'auto';
+    hiddenScanVideo.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px;opacity:0';
+    document.body.appendChild(hiddenScanVideo);
+    hiddenScanCanvas = document.createElement('canvas');
+    hiddenScanCanvas.width = 256;
+    hiddenScanCanvas.height = 256;
+  }
+  return hiddenScanVideo;
+}
+
+/** 用隐藏 video 抽帧，不拖动主播放器进度（避免「快进扫一遍」） */
 async function scanVideoForActionTimeline() {
   const duration = videoPlayer.duration;
-  if (!duration || !isFinite(duration)) return;
+  if (!duration || !isFinite(duration) || !videoPlayer.src) return;
 
   const interval = 2.0;
   const maxFrames = 90;
-  const savedTime = videoPlayer.currentTime;
-  const wasPaused = videoPlayer.paused;
-  videoPlayer.pause();
+  const scanVideo = getHiddenScanVideo();
+  const scanCtx = hiddenScanCanvas.getContext('2d');
 
-  if (prepareStatus) {
-    prepareStatus.hidden = false;
-    prepareStatus.textContent = '正在扫描视频帧，生成关键动作时间线…';
-    prepareStatus.className = 'prepare-status loading';
+  if (scanVideo.src !== videoPlayer.src) {
+    scanVideo.src = videoPlayer.src;
+    await new Promise((resolve, reject) => {
+      scanVideo.onloadedmetadata = () => resolve();
+      scanVideo.onerror = () => reject(new Error('hidden video load failed'));
+    });
   }
 
   const frames = [];
   try {
     for (let t = 0; t < duration && frames.length < maxFrames; t += interval) {
-      videoPlayer.currentTime = Math.min(t, duration - 0.05);
-      await waitVideoSeeked();
-      captureCtx.drawImage(videoPlayer, 0, 0, 256, 256);
-      const jpeg_b64 = await canvasToDataUrl(captureCanvas);
+      scanVideo.currentTime = Math.min(t, duration - 0.05);
+      await waitVideoSeeked(scanVideo);
+      scanCtx.drawImage(scanVideo, 0, 0, 256, 256);
+      const jpeg_b64 = await canvasToDataUrl(hiddenScanCanvas);
       frames.push({ t_sec: Math.round(t * 10) / 10, jpeg_b64 });
     }
 
@@ -137,12 +164,7 @@ async function scanVideoForActionTimeline() {
     if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
 
     const prep = await fetch('/prepare/status').then(x => x.json()).catch(() => ({}));
-    const vlmLabel = prep.vlm_model || prep.vlm_mode || 'vlm';
-    if (prepareStatus) {
-      prepareStatus.textContent =
-        `动作时间线：${data.key_actions} 个关键动作；VLM=${vlmLabel}（事件触发，非常驻）`;
-      prepareStatus.className = 'prepare-status ready';
-    }
+    updatePrepareStatusLine(prep, data.key_actions);
     console.log('Action timeline', data.timeline);
   } catch (err) {
     console.warn('Action timeline scan failed', err);
@@ -150,44 +172,87 @@ async function scanVideoForActionTimeline() {
       prepareStatus.textContent = `动作时间线失败: ${err.message}`;
       prepareStatus.className = 'prepare-status error';
     }
-  } finally {
-    videoPlayer.currentTime = savedTime;
-    if (!wasPaused) videoPlayer.play().catch(() => {});
   }
 }
 
-/** 选视频后即预热 Whisper/TTS（VLM 仅在提问或慢事件时短时触发，非常驻） */
-async function startBackendPrepare() {
-  if (clientMode !== 'player') return;
-  prepareStatus.hidden = false;
-  prepareStatus.textContent = '正在后台加载 Whisper 与 TTS…';
-  prepareStatus.className = 'prepare-status loading';
-
-  try {
-    await fetch('/prepare', { method: 'POST' });
-    const deadline = Date.now() + 120000;
-    while (Date.now() < deadline) {
-      const r = await fetch('/prepare/status');
-      const st = await r.json();
-      if (st.status === 'ready') {
-        prepareStatus.textContent =
-          `Whisper/TTS 就绪；VLM=${st.vlm_model || st.vlm_mode}（提问时触发）`;
-        prepareStatus.className = 'prepare-status ready';
-        return;
-      }
-      if (st.status === 'error') {
-        prepareStatus.textContent = `预热失败: ${st.error || '未知错误'}`;
-        prepareStatus.className = 'prepare-status error';
-        return;
-      }
-      await new Promise(res => setTimeout(res, 500));
-    }
-    prepareStatus.textContent = '预热超时，仍可点「开始分析」（将现场加载）';
+function updatePrepareStatusLine(prep, keyActions) {
+  if (!prepareStatus) return;
+  const vlmMode = prep.vlm_mode || 'unknown';
+  const vlmModel = prep.vlm_model || '';
+  const keyHint = keyActions != null ? `动作时间线 ${keyActions} 条；` : '';
+  let line = `${keyHint}Whisper/TTS 就绪；VLM=${vlmMode}`;
+  if (vlmModel) line += ` (${vlmModel})`;
+  if (vlmMode === 'mock') {
+    line += ' — 请在项目根目录 .env 配置 VLM_API_KEY';
     prepareStatus.className = 'prepare-status error';
-  } catch (err) {
-    prepareStatus.textContent = `无法连接预热接口: ${err.message}`;
-    prepareStatus.className = 'prepare-status error';
+  } else {
+    prepareStatus.className = 'prepare-status ready';
   }
+  prepareStatus.textContent = line;
+  prepareStatus.hidden = false;
+}
+
+function updateStartButtonState() {
+  if (!btnStart || clientMode !== 'player') return;
+  const hasVideo = Boolean(videoPlayer.src);
+  btnStart.disabled = !hasVideo;
+  if (!hasVideo) {
+    btnStart.textContent = '▶ 开始分析';
+    return;
+  }
+  fetch('/prepare/status')
+    .then(r => r.json())
+    .then(st => {
+      if (st.status === 'ready') {
+        btnStart.textContent = '▶ 开始分析';
+        btnStart.disabled = false;
+      } else if (st.status === 'loading') {
+        btnStart.textContent = '预热中…';
+        btnStart.disabled = true;
+      } else {
+        btnStart.textContent = '▶ 开始分析';
+        btnStart.disabled = false;
+      }
+    })
+    .catch(() => {
+      btnStart.textContent = '▶ 开始分析';
+      btnStart.disabled = false;
+    });
+}
+
+/** 选视频后即预热 Whisper/TTS；返回在就绪时 resolve 的 Promise */
+function startBackendPrepare() {
+  if (clientMode !== 'player') return Promise.resolve();
+  if (backendPreparePromise) return backendPreparePromise;
+
+  backendPreparePromise = (async () => {
+    if (prepareStatus) {
+      prepareStatus.hidden = false;
+      prepareStatus.textContent = '正在加载 Whisper 与 TTS…';
+      prepareStatus.className = 'prepare-status loading';
+    }
+    updateStartButtonState();
+
+    try {
+      const r = await fetch('/prepare?wait=true', { method: 'POST' });
+      const st = await r.json();
+      if (st.status === 'error') {
+        throw new Error(st.error || '预热失败');
+      }
+      updatePrepareStatusLine(st, null);
+      updateStartButtonState();
+      return st;
+    } catch (err) {
+      if (prepareStatus) {
+        prepareStatus.textContent = `预热失败: ${err.message}`;
+        prepareStatus.className = 'prepare-status error';
+      }
+      updateStartButtonState();
+      throw err;
+    }
+  })();
+
+  return backendPreparePromise;
 }
 
 // ── 开始/停止分析（player 模式）────────────────────────────────────────
@@ -197,14 +262,32 @@ if (clientMode === 'player') {
       alert('请先选择视频文件');
       return;
     }
+    const prevLabel = btnStart.textContent;
+    btnStart.disabled = true;
+    btnStart.textContent = '预热中…';
     try {
+      await startBackendPrepare();
+      if (timelineScanPromise) await timelineScanPromise.catch(() => {});
+
       const resp = await fetch('/start', { method: 'POST' });
-      const data = await resp.json();
+      const raw = await resp.text();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        throw new Error(raw.slice(0, 120) || `HTTP ${resp.status}`);
+      }
       if (resp.status === 409) {
         alert(data.error || '分析已在运行');
         return;
       }
       if (data.error) { alert('启动失败：' + data.error); return; }
+
+      if (data.vlm_mode === 'mock') {
+        addSystemMsg(
+          'VLM 当前为 mock 模式（会复述你的话）。请在 run.py 同目录 .env 配置 VLM_API_KEY 后重启服务。'
+        );
+      }
 
       isAnalysisRunning = true;
       connectWebSocket();
@@ -214,6 +297,10 @@ if (clientMode === 'player') {
       addSystemMsg('分析已开始，等待主连接确认…');
     } catch (err) {
       alert('连接后端失败：' + err.message);
+    } finally {
+      btnStart.disabled = false;
+      btnStart.textContent = prevLabel;
+      updateStartButtonState();
     }
   });
 
@@ -240,9 +327,21 @@ btnClearChat.addEventListener('click', () => {
 // ── 视频元数据加载完成 → 预热 + 抽帧生成动作时间线 ───────────────────
 videoPlayer.addEventListener('loadedmetadata', () => {
   if (clientMode !== 'player') return;
-  startBackendPrepare();
-  scanVideoForActionTimeline();
+  if (prepareStatus) {
+    prepareStatus.hidden = false;
+    prepareStatus.textContent = '正在后台准备（Whisper/TTS + 动作时间线）…';
+    prepareStatus.className = 'prepare-status loading';
+  }
+  startBackendPrepare().catch(() => {});
+  timelineScanPromise = scanVideoForActionTimeline();
+  updateStartButtonState();
 });
+
+if (chkVideoAudio) {
+  chkVideoAudio.addEventListener('change', () => {
+    videoPlayer.muted = !chkVideoAudio.checked;
+  });
+}
 
 // ── WebSocket ─────────────────────────────────────────────────────────
 function clearWsReconnectTimer() {
@@ -597,6 +696,7 @@ async function startMicrophone() {
         channelCount: 1,
         echoCancellation: true,
         noiseSuppression: true,
+        autoGainControl: true,
       }
     });
 

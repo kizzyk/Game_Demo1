@@ -33,7 +33,12 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-load_dotenv()
+_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_ROOT / ".env")
+
+from backend.config import reload_config_from_env
+reload_config_from_env()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
@@ -80,7 +85,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+FRONTEND_DIR = _ROOT / "frontend"
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
@@ -89,6 +94,19 @@ _action_timeline: Optional[ActionTimeline] = None
 _ws_clients: list[WebSocket] = []
 _ws_roles: dict[WebSocket, str] = {}   # "player" | "observer"
 _primary_ws: Optional[WebSocket] = None
+
+
+@app.on_event("startup")
+async def _on_startup():
+    """服务启动即后台预热 Whisper/TTS，缩短首次「开始分析」等待。"""
+    cfg = get_config()
+    await warmup.start_background_warmup(cfg)
+    logger.info(
+        "Startup: vlm=%s model=%s key=%s",
+        vlm_provider(cfg),
+        cfg.vlm_model,
+        "set" if (cfg.vlm_api_key or os.getenv("VLM_API_KEY")) else "missing",
+    )
 
 
 def _reassign_primary_from_players() -> Optional[WebSocket]:
@@ -205,6 +223,7 @@ class GameSession:
         )
         self.asr_handler.on_state_change = self._on_asr_state_change
         self.asr_handler.on_barge_in = self._on_asr_barge_in
+        self.asr_handler.is_tts_playing = lambda: self.tts_queue.is_speaking
         self.tts_queue = TTSQueue(
             tts_engine=self.tts_engine,
             asr_handler=self.asr_handler,
@@ -468,7 +487,9 @@ class GameSession:
         self._schedule(self._broadcast({"type": "asr_state", "state": state}))
 
     def _on_asr_barge_in(self):
-        """用户说话打断 TTS，恢复收音。"""
+        """用户说话打断 TTS，恢复收音（仅在实际播报时生效）。"""
+        if not self.tts_queue.is_speaking:
+            return
         logger.info("Barge-in: user speech interrupted TTS")
         self.tts_queue.barge_in_interrupt()
 
@@ -607,22 +628,28 @@ async def prepare_status():
     st = warmup.get_status()
     st["vlm_mode"] = vlm_provider(cfg)
     st["vlm_model"] = cfg.vlm_model
+    st["vlm_key_set"] = bool(cfg.vlm_api_key or os.getenv("VLM_API_KEY"))
     return st
 
 
 @app.post("/prepare")
-async def prepare_resources():
+async def prepare_resources(wait: bool = False):
     """
     选择视频后即可调用：后台加载 Whisper 与 TTS 预缓存。
-    VLM 不在此常驻加载——仅在事件触发时短时运行（mock 或 Claude）。
+    wait=true 时阻塞直到就绪（「开始分析」前调用）。
     """
     cfg = get_config()
     st = warmup.get_status()
-    if st["status"] == "ready":
-        return st
-    if st["status"] != "loading":
-        await warmup.start_background_warmup(cfg)
-    return warmup.get_status()
+    if st["status"] != "ready":
+        if st["status"] != "loading":
+            await warmup.start_background_warmup(cfg)
+        if wait:
+            await warmup.ensure_warmup(cfg)
+    st = warmup.get_status()
+    st["vlm_mode"] = vlm_provider(cfg)
+    st["vlm_model"] = cfg.vlm_model
+    st["vlm_key_set"] = bool(cfg.vlm_api_key or os.getenv("VLM_API_KEY"))
+    return st
 
 
 class FrameSampleIn(BaseModel):
@@ -715,7 +742,14 @@ async def start_session():
     await _session.start()
     cfg = get_config()
     mode = "mock" if getattr(_session.nitrogen, "is_mock", False) else "live"
-    return {"status": "ok", "nitrogen_mode": mode}
+    vlm_mode = vlm_provider(cfg)
+    return {
+        "status": "ok",
+        "nitrogen_mode": mode,
+        "vlm_mode": vlm_mode,
+        "vlm_model": cfg.vlm_model,
+        "prepare": warmup.get_status(),
+    }
 
 
 @app.post("/stop")

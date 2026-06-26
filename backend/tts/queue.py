@@ -89,6 +89,11 @@ class TTSQueue:
     def pending_utterance_id(self) -> Optional[int]:
         return self._pending_done_id
 
+    @property
+    def is_speaking(self) -> bool:
+        with self._lock:
+            return self._is_speaking
+
     def set_callbacks(self, on_start=None, on_end=None, on_interrupt=None):
         self._on_speak_start = on_start
         self._on_speak_end   = on_end

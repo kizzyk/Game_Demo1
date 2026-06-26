@@ -15,6 +15,11 @@
 import logging
 
 import uvicorn
+from dotenv import load_dotenv
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent
+load_dotenv(_ROOT / ".env")
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +37,10 @@ def _websocket_stack_ready() -> bool:
 
 
 if __name__ == "__main__":
-    from backend.config import get_config
+    from backend.config import reload_config_from_env
     from backend.nitrogen.factory import nitrogen_mock_enabled
 
-    cfg = get_config()
+    cfg = reload_config_from_env()
     if nitrogen_mock_enabled(cfg):
         logger.info("NitroGen: mock 模式（仅前端闭环，无 ZMQ）。实机推理请设 NITROGEN_MOCK=0")
     from backend.slow.vlm_factory import vlm_provider

@@ -90,6 +90,8 @@ class TTSEngine:
         def _cancelled() -> bool:
             return bool(is_cancelled and is_cancelled())
 
+        loop = None
+        audio_data = None
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -106,10 +108,19 @@ class TTSEngine:
                 on_error()
             return
         except Exception as e:
+            if _cancelled():
+                logger.debug("TTS synthesis cancelled: '%s'", text[:20])
+                return
             logger.error("TTS synthesis error: %s", e)
             if on_error and not _cancelled():
                 on_error()
             return
+        finally:
+            if loop is not None:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
 
         if _cancelled():
             logger.debug("TTS synthesis discarded (cancelled): '%s'", text[:20])

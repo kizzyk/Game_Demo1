@@ -23,6 +23,7 @@ def client():
          }):
         mock_start.return_value = None
         with TestClient(main_module.app) as c:
+            mock_start.reset_mock()
             yield c, mock_start
 
 

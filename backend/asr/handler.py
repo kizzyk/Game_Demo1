@@ -81,6 +81,7 @@ class ASRHandler:
         self.on_utterance: Optional[Callable[[str, int], None]] = None
         self.on_state_change: Optional[Callable[[str], None]] = None
         self.on_barge_in: Optional[Callable[[], None]] = None
+        self.is_tts_playing: Optional[Callable[[], bool]] = None
 
         self._muted = False
         self._activity_state = "listening"
@@ -238,6 +239,9 @@ class ASRHandler:
     def _check_barge_in_unlocked(self, audio_bytes: bytes, sample_rate: int):
         """TTS 播报期间检测用户说话 → 触发打断回调（不写入转写缓冲）。"""
         if not self._barge_in_enabled or not self._barge_in_armed:
+            return
+        checker = self.is_tts_playing
+        if checker is not None and not checker():
             return
 
         audio = np.frombuffer(audio_bytes, dtype=np.int16)

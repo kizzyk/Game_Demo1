@@ -325,6 +325,7 @@ class TestBargeIn:
     def test_barge_in_during_mute_triggers_callback(self, asr_handler):
         fired = threading.Event()
         asr_handler.on_barge_in = fired.set
+        asr_handler.is_tts_playing = lambda: True
         asr_handler.mute()
 
         for _ in range(8):

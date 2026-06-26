@@ -37,7 +37,11 @@
 
         <div id="video-player-area" style="display:none">
           <p id="prepare-status" class="prepare-status" hidden></p>
-          <video id="video-player" controls></video>
+          <video id="video-player" controls playsinline></video>
+          <label class="video-audio-toggle">
+            <input type="checkbox" id="chk-video-audio" />
+            开启游戏原声（关闭可改善麦克风收音）
+          </label>
           <div id="video-controls">
             <button id="btn-start-analysis" class="btn btn-primary">▶ 开始分析</button>
             <button id="btn-stop-analysis"  class="btn btn-danger"   style="display:none">■ 停止</button>

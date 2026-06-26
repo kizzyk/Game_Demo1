@@ -58,7 +58,7 @@ class Config:
     vad_silence_end_sec: float = 1.2        # 静音多久判定说话结束
     tts_mute_tail_sec: float = 0.2          # TTS 结束后 ASR 额外静默（消余音）
     barge_in_enabled: bool = True           # TTS 播报时检测用户说话并打断
-    barge_in_threshold_mult: float = 1.35   # 打断阈值 = 静音阈值 × 此系数
+    barge_in_threshold_mult: float = 2.0   # 打断阈值 = 静音阈值 × 此系数（防视频串音）
 
     # ── 全局播报频率上限（硬限制）────────────────────────────────────
     global_tts_min_interval: float = 2.0    # 任意两次被动播报之间至少间隔（秒）
@@ -66,6 +66,18 @@ class Config:
 
 # 全局单例
 _config: Config | None = None
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def reload_config_from_env() -> Config:
+    """重新从环境变量刷新配置（load_dotenv 之后调用）。"""
+    global _config
+    if _config is None:
+        _config = Config()
+    _apply_env(_config)
+    if _config.vlm_api_key and os.getenv("VLM_MOCK") is None:
+        _config.vlm_mock = False
+    return _config
 
 
 def _env_bool(name: str) -> bool | None:
@@ -111,4 +123,6 @@ def get_config() -> Config:
     if _config is None:
         _config = Config()
         _apply_env(_config)
+        if _config.vlm_api_key and os.getenv("VLM_MOCK") is None:
+            _config.vlm_mock = False
     return _config
