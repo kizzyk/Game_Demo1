@@ -113,6 +113,7 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
 }
 .dot.active::before  { background: var(--slow); }
 .dot.loading::before { background: var(--fast); animation: pulse 1s infinite; }
+.dot.error::before   { background: #f55; }
 
 @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.3 } }
 

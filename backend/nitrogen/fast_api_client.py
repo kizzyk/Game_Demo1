@@ -90,6 +90,12 @@ class FastApiNitroGenClient:
         self.inference_count = 0
         self.timeout_count = 0
         self.error_count = 0
+        self._last_error: Optional[str] = None
+        self._last_ok_time: float = 0.0
+
+    @property
+    def last_error(self) -> Optional[str]:
+        return self._last_error
 
     def start(self, frame_pipe: "VideoFramePipe"):
         self._frame_pipe = frame_pipe
@@ -171,6 +177,8 @@ class FastApiNitroGenClient:
                 if gen_at_start == self._signal_generation:
                     self._latest_signal = signal
             self.inference_count += 1
+            self._last_error = None
+            self._last_ok_time = time.time()
             if self.inference_count == 1:
                 logger.info(
                     "FastAPI NitroGen first inference OK → %s intent=%s",
@@ -178,12 +186,16 @@ class FastApiNitroGenClient:
                 )
         except httpx.TimeoutException:
             self.timeout_count += 1
+            self._last_error = f"推理超时（>{self.timeout_sec}s）"
             logger.warning(
                 "FastAPI NitroGen timeout (#%d) url=%s",
                 self.timeout_count, self.base_url,
             )
         except httpx.ConnectError as e:
             self.error_count += 1
+            self._last_error = (
+                f"无法连接 {self.base_url}（请检查 SSH 隧道与远端服务）: {e}"
+            )
             logger.error(
                 "FastAPI NitroGen connect failed url=%s — "
                 "请确认 SSH 隧道与 NITROGEN_FAST_API_URL（勿用陪玩 8000 端口）: %s",
@@ -191,6 +203,7 @@ class FastApiNitroGenClient:
             )
         except Exception as e:
             self.error_count += 1
+            self._last_error = str(e)
             logger.error("FastAPI NitroGen predict error (%s): %s", self.base_url, e)
 
     def _inference_loop(self, frame_pipe: "VideoFramePipe"):

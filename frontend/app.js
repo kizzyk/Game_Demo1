@@ -42,6 +42,7 @@ let isAnalysisRunning = false;
 let isPrimaryClient = false;
 let wsReconnectTimer = null;
 let wsReconnectAttempts = 0;
+let lastNitrogenErrorMsg = '';
 const WS_RECONNECT_BASE_MS = 1000;
 const WS_RECONNECT_MAX_MS = 15000;
 const APP_BUILD = '20250625-mic';
@@ -325,6 +326,11 @@ if (clientMode === 'player') {
           'VLM 当前为 mock 模式（会复述你的话）。请在 run.py 同目录 .env 配置 VLM_API_KEY 后重启服务。'
         );
       }
+      if (data.nitrogen_health && data.nitrogen_health.ok === false) {
+        addSystemMsg(
+          `NitroGen 远端未就绪：${data.nitrogen_health.message || '请检查 SSH 隧道与远端 FastAPI'}`
+        );
+      }
 
       isAnalysisRunning = true;
       if (data.asr_state) {
@@ -598,6 +604,26 @@ function handleServerMessage(msg) {
       dotVLM.className = msg.busy ? 'dot active' : 'dot';
       break;
 
+    case 'nitrogen_state':
+      if (msg.status === 'ok' || (msg.inference_count > 0 && !msg.last_error)) {
+        if (dotNitrogen.className !== 'dot active') {
+          dotNitrogen.className = 'dot active';
+        }
+        dotNitrogen.title = msg.message || `NitroGen 已连接（推理 ${msg.inference_count || 0} 次）`;
+      } else if (msg.status === 'error' || msg.last_error) {
+        dotNitrogen.className = 'dot error';
+        const errText = msg.message || msg.last_error || 'NitroGen 连接失败';
+        dotNitrogen.title = errText;
+        if (errText !== lastNitrogenErrorMsg) {
+          lastNitrogenErrorMsg = errText;
+          addSystemMsg(`NitroGen：${errText}`);
+        }
+      } else {
+        dotNitrogen.className = 'dot loading';
+        dotNitrogen.title = 'NitroGen：等待首帧/首次推理';
+      }
+      break;
+
     case 'perception':
       $('dbg-intent').textContent  = msg.intent;
       $('dbg-conf').textContent    = (msg.confidence * 100).toFixed(0) + '%';
@@ -627,6 +653,9 @@ function handleServerMessage(msg) {
       }
       if (msg.state === 'user_question_no_frame') {
         addSystemMsg(msg.message || '画面未就绪，暂时无法回答，请点击播放视频后再问');
+      }
+      if (msg.state === 'vlm_error' && msg.message) {
+        addSystemMsg(msg.message);
       }
       break;
 

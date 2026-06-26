@@ -295,6 +295,7 @@ class GameSession:
             get_actions_timeline_text=self._actions_timeline_text,
             vlm_dedup_sec=cfg.vlm_dedup_sec,
             on_busy_change=self._on_vlm_busy_change,
+            on_user_error=self._on_vlm_user_error,
             vlm_nitrogen_input=cfg.vlm_nitrogen_input,
         )
 
@@ -328,6 +329,7 @@ class GameSession:
 
         self._running = True
         self._main_loop_task = asyncio.create_task(self._analysis_loop())
+        asyncio.create_task(self._probe_nitrogen_on_start())
 
         await self._broadcast({"type": "status", "state": "started"})
         await self._broadcast_asr_state()
@@ -370,37 +372,90 @@ class GameSession:
 
     # ── 核心分析循环 ──────────────────────────────────────────────────
 
+    async def _probe_nitrogen_on_start(self):
+        """实机 fast_api 模式：启动后探测远端 NitroGen 并通知前端。"""
+        from backend.nitrogen.factory import nitrogen_backend
+        if nitrogen_backend(self.cfg) != "fast_api":
+            return
+        import os
+        from backend.nitrogen.health import check_fast_api_health
+
+        url = os.getenv("NITROGEN_FAST_API_URL", self.cfg.nitrogen_fast_api_url)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None, lambda: check_fast_api_health(url),
+        )
+        await self._broadcast_nitrogen_state(result)
+        if not result.get("ok"):
+            logger.error("NitroGen health probe failed: %s", result.get("message"))
+
+    async def _broadcast_nitrogen_state(self, health: dict | None = None):
+        nitro = self.nitrogen
+        payload = {
+            "type": "nitrogen_state",
+            "backend": getattr(nitro, "backend", nitrogen_mode_label(self.cfg)),
+            "inference_count": getattr(nitro, "inference_count", 0),
+            "error_count": getattr(nitro, "error_count", 0),
+            "timeout_count": getattr(nitro, "timeout_count", 0),
+            "last_error": getattr(nitro, "last_error", None),
+        }
+        if health is not None:
+            payload.update({
+                "status": "ok" if health.get("ok") else "error",
+                "message": health.get("message", ""),
+                "port_open": health.get("port_open"),
+                "reset_ok": health.get("reset_ok"),
+                "predict_ok": health.get("predict_ok"),
+            })
+        elif getattr(nitro, "inference_count", 0) > 0:
+            payload["status"] = "ok"
+        elif getattr(nitro, "last_error", None):
+            payload["status"] = "error"
+            payload["message"] = nitro.last_error
+        else:
+            payload["status"] = "waiting"
+        await self._broadcast(payload)
+
     async def _analysis_loop(self):
         interval = 1.0 / nitrogen_analysis_fps(self.cfg)
+        last_error_broadcast = 0.0
 
         while self._running:
-            if not self._analysis_paused:
-                signal     = self.nitrogen.latest_signal
-                video_time = self.frame_buffer.video_position
+            signal     = self.nitrogen.latest_signal
+            video_time = self.frame_buffer.video_position
 
-                if signal is not None:
+            if signal is not None:
+                if not self._analysis_paused:
                     self.ctx_buffer.push_signal(video_time, signal)
 
-                    await self._broadcast({
-                        "type":       "perception",
-                        "intent":     signal.primary_intent,
-                        "confidence": round(signal.confidence, 3),
-                        "direction":  signal.move_direction,
-                        "horizon":    signal.horizon_sequence,
-                        "video_time": round(video_time, 2),
-                        "steer":      round(signal.steer, 3),
-                        "throttle":   signal.throttle,
-                        "brake":      signal.brake,
-                        "hint":       signal.hint_text or None,
-                        "is_change":  signal.is_action_change,
-                    })
+                await self._broadcast({
+                    "type":       "perception",
+                    "intent":     signal.primary_intent,
+                    "confidence": round(signal.confidence, 3),
+                    "direction":  signal.move_direction,
+                    "horizon":    signal.horizon_sequence,
+                    "video_time": round(video_time, 2),
+                    "steer":      round(signal.steer, 3),
+                    "throttle":   signal.throttle,
+                    "brake":      signal.brake,
+                    "hint":       signal.hint_text or None,
+                    "is_change":  signal.is_action_change,
+                })
 
+                if not self._analysis_paused:
                     event = self.action_filter.process(
                         signal, video_time,
                         global_min_interval=self.cfg.global_tts_min_interval,
                     )
                     if event is not None:
                         await self._handle_event(event)
+
+            last_err = getattr(self.nitrogen, "last_error", None)
+            err_count = getattr(self.nitrogen, "error_count", 0)
+            infer_count = getattr(self.nitrogen, "inference_count", 0)
+            if last_err and infer_count == 0 and err_count != last_error_broadcast:
+                last_error_broadcast = err_count
+                await self._broadcast_nitrogen_state()
 
             await asyncio.sleep(interval)
 
@@ -462,6 +517,12 @@ class GameSession:
             user_text=text,
         )
         frame = self.frame_buffer.latest_frame
+        if frame is None and self._video_frame_count > 0:
+            for _ in range(10):
+                await asyncio.sleep(0.05)
+                frame = self.frame_buffer.latest_frame
+                if frame is not None:
+                    break
         if frame is None:
             logger.warning(
                 "User question skipped: no video frame (frames_rx=%d). "
@@ -580,6 +641,13 @@ class GameSession:
     def _on_vlm_busy_change(self, busy: bool):
         self._schedule(self._broadcast({"type": "vlm_state", "busy": busy}))
 
+    def _on_vlm_user_error(self, message: str):
+        self._schedule(self._broadcast({
+            "type": "status",
+            "state": "vlm_error",
+            "message": message,
+        }))
+
     def _on_asr_state_change(self, state: str):
         self._schedule(self._broadcast({"type": "asr_state", "state": state}))
 
@@ -680,12 +748,47 @@ async def probe_page():
     return HTMLResponse("<h1>probe.html not found</h1>", status_code=404)
 
 
+@app.get("/nitrogen/health")
+async def nitrogen_health():
+    """探测 NitroGen FastAPI（SSH 隧道 + /reset + /predict）。"""
+    cfg = get_config()
+    from backend.nitrogen.factory import nitrogen_backend
+    backend = nitrogen_backend(cfg)
+    if backend == "mock":
+        return {"ok": True, "backend": "mock", "message": "mock 模式无需远端"}
+    if backend != "fast_api":
+        return {
+            "ok": False,
+            "backend": backend,
+            "message": f"当前后端为 {backend}，仅 fast_api 支持 HTTP 探针",
+        }
+    import os
+    from backend.nitrogen.health import check_fast_api_health
+    from backend.nitrogen.ssh_tunnel import ensure_nitrogen_ssh_tunnel
+
+    url = os.getenv("NITROGEN_FAST_API_URL", cfg.nitrogen_fast_api_url)
+    tunnel_error = None
+    try:
+        ensure_nitrogen_ssh_tunnel(url)
+    except Exception as e:
+        tunnel_error = str(e)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, lambda: check_fast_api_health(url),
+    )
+    result["backend"] = backend
+    if tunnel_error:
+        result["tunnel_error"] = tunnel_error
+    return result
+
+
 @app.get("/probe/health")
 async def probe_health():
     """探针：服务端组件快照"""
     cfg = get_config()
     backend = nitrogen_mode_label(cfg)
     nitro = None
+    nitrogen_health_data = None
     if _session is not None:
         nitro = {
             "mode": getattr(_session.nitrogen, "backend", backend),
@@ -693,7 +796,16 @@ async def probe_health():
             "inference_count": getattr(_session.nitrogen, "inference_count", 0),
             "timeout_count": getattr(_session.nitrogen, "timeout_count", 0),
             "error_count": getattr(_session.nitrogen, "error_count", 0),
+            "last_error": getattr(_session.nitrogen, "last_error", None),
         }
+    if backend == "fast_api":
+        import os
+        from backend.nitrogen.health import check_fast_api_health
+        url = os.getenv("NITROGEN_FAST_API_URL", cfg.nitrogen_fast_api_url)
+        try:
+            nitrogen_health_data = check_fast_api_health(url, probe_predict=False)
+        except Exception as e:
+            nitrogen_health_data = {"ok": False, "message": str(e)}
     return {
         "ok": True,
         "websocket_ready": _websocket_stack_ready(),
@@ -724,6 +836,7 @@ async def probe_health():
         "ws_clients": len(_ws_clients),
         "has_primary": _primary_ws is not None,
         "nitrogen": nitro,
+        "nitrogen_health": nitrogen_health_data,
     }
 
 
@@ -935,10 +1048,20 @@ async def start_session():
     cfg = get_config()
     backend = nitrogen_mode_label(cfg)
     vlm_mode = vlm_provider(cfg)
+    nitrogen_health_data = None
+    if backend == "fast_api":
+        import os
+        from backend.nitrogen.health import check_fast_api_health
+        url = os.getenv("NITROGEN_FAST_API_URL", cfg.nitrogen_fast_api_url)
+        loop = asyncio.get_running_loop()
+        nitrogen_health_data = await loop.run_in_executor(
+            None, lambda: check_fast_api_health(url, probe_predict=False),
+        )
     return {
         "status": "ok",
         "nitrogen_mode": "mock" if backend == "mock" else "live",
         "nitrogen_backend": backend,
+        "nitrogen_health": nitrogen_health_data,
         "vlm_mode": vlm_mode,
         "vlm_model": cfg.vlm_model,
         "prepare": warmup.get_status(),

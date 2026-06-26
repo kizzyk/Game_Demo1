@@ -43,6 +43,7 @@ class VLMRequestManager:
         get_actions_timeline_text: Optional[Callable[[float], str]] = None,
         vlm_dedup_sec: float = 5.0,
         on_busy_change: Optional[Callable[[bool], None]] = None,
+        on_user_error: Optional[Callable[[str], None]] = None,
         min_busy_display_sec: float = 0.45,
         vlm_nitrogen_input: bool = False,
     ):
@@ -56,6 +57,7 @@ class VLMRequestManager:
         self._get_actions_timeline_text = get_actions_timeline_text
         self._vlm_dedup_sec = vlm_dedup_sec
         self._on_busy_change = on_busy_change
+        self._on_user_error = on_user_error
         self._min_busy_display_sec = min_busy_display_sec
         self._vlm_nitrogen_input = vlm_nitrogen_input
 
@@ -181,6 +183,11 @@ class VLMRequestManager:
         except Exception as e:
             logger.error("VLM call failed: %s", e)
             if args["event"].type == EventType.USER_QUESTION:
+                if self._on_user_error:
+                    try:
+                        self._on_user_error(f"VLM 调用失败: {e}")
+                    except Exception as cb_err:
+                        logger.error("VLM on_user_error callback failed: %s", cb_err)
                 self._tts.push("抱歉，我没听清，请再说一次。", Priority.USER_ANSWER)
 
         finally:
