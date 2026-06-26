@@ -18,7 +18,7 @@ const STEPS = [
   { id: 'push-pcm',     name: '推送静音 PCM (0x01)',      critical: false },
   { id: 'tts-roundtrip', name: 'TTS 合成 → MP3 → tts_done', critical: true },
   { id: 'observer',     name: '旁观连接 register',        critical: false },
-  { id: 'perception',   name: 'NitroGen 感知回传',        critical: false },
+  { id: 'perception',   name: '感知回传 (perception)',    critical: true },
 ];
 
 const PROBE_TTS_TEXT = '探针测试，链路正常。';
@@ -308,7 +308,8 @@ async function runAllProbes() {
           '服务端未安装 websockets：请执行 pip install "uvicorn[standard]" websockets 后重启 python run.py'
         );
       }
-      return `session=${data.session_running}, ws=${data.ws_clients}`;
+      const mode = data.nitrogen_mode === 'mock' ? 'mock(前端闭环)' : 'live';
+      return `session=${data.session_running}, ws=${data.ws_clients}, nitrogen=${mode}`;
     },
     status: async () => {
       const r = await fetch('/session/status');
@@ -383,19 +384,18 @@ async function runAllProbes() {
       return `role=${role.role}`;
     },
     perception: async () => {
+      const health = await fetch('/probe/health').then(x => x.json());
+      const mockMode = health.nitrogen_mode === 'mock';
       const jpeg = await makeSyntheticJpeg();
       for (let i = 0; i < 5; i++) {
         probeWs.send(packVideoFrame(jpeg, 3.0 + i * 0.1));
         await new Promise(r => setTimeout(r, 120));
       }
-      try {
-        const p = await waitWsJson(
-          probeWs, m => m.type === 'perception', PERCEPTION_TIMEOUT_MS,
-        );
-        return `intent=${p.intent}, conf=${(p.confidence * 100).toFixed(0)}%`;
-      } catch {
-        throw new Error('NitroGen 未回传 perception（检查 ZMQ 服务是否启动）');
-      }
+      const p = await waitWsJson(
+        probeWs, m => m.type === 'perception', PERCEPTION_TIMEOUT_MS,
+      );
+      const tag = mockMode ? 'mock' : 'live';
+      return `intent=${p.intent}, conf=${(p.confidence * 100).toFixed(0)}% (${tag})`;
     },
   };
 

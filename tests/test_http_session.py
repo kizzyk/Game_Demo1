@@ -20,7 +20,7 @@ def http_client():
     main_module._ws_roles.clear()
     main_module._primary_ws = None
 
-    with patch.object(main_module, "NitroGenClient") as mock_nitro_cls, \
+    with patch.object(main_module, "create_nitrogen_client") as mock_nitro_factory, \
          patch.object(main_module, "ASRHandler") as mock_asr_cls, \
          patch.object(main_module, "TTSEngine"), \
          patch.object(main_module, "get_config") as mock_cfg:
@@ -52,7 +52,7 @@ def http_client():
         mock_cfg.return_value = cfg
 
         mock_asr_cls.return_value = MagicMock()
-        mock_nitro_cls.return_value = MagicMock()
+        mock_nitro_factory.return_value = MagicMock()
 
         with TestClient(main_module.app) as client:
             yield client

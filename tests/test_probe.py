@@ -20,13 +20,14 @@ def client():
     main_module._ws_roles.clear()
     main_module._primary_ws = None
 
-    with patch.object(main_module, "NitroGenClient") as mock_nitro_cls, \
+    with patch.object(main_module, "create_nitrogen_client") as mock_nitro_factory, \
          patch.object(main_module, "ASRHandler") as mock_asr_cls, \
          patch.object(main_module, "TTSEngine"), \
          patch.object(main_module, "get_config") as mock_cfg:
 
         cfg = MagicMock()
         cfg.nitrogen_server = "tcp://localhost:5555"
+        cfg.nitrogen_mock = True
         cfg.fast_trigger_confidence = 0.75
         cfg.sustained_danger_sec = 3.0
         cfg.cooldowns = {}
@@ -51,7 +52,7 @@ def client():
         cfg.global_tts_min_interval = 2.0
         mock_cfg.return_value = cfg
         mock_asr_cls.return_value = MagicMock()
-        mock_nitro_cls.return_value = MagicMock()
+        mock_nitro_factory.return_value = MagicMock()
 
         with TestClient(main_module.app) as c:
             yield c
@@ -71,6 +72,7 @@ class TestProbeEndpoints:
         data = resp.json()
         assert data["ok"] is True
         assert "websocket_ready" in data
+        assert data["nitrogen_mode"] in ("mock", "live")
         assert data["session_running"] is False
 
     def test_probe_tts_echo_without_session(self, client):

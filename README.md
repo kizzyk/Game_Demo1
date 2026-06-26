@@ -94,17 +94,32 @@ requirements.txt 中额外安装的包：
 ### 配置 .env
 
 ```
-ANTHROPIC_API_KEY=sk-ant-xxxxx   # 必填
-NITROGEN_SERVER=tcp://localhost:5555   # NitroGen 服务地址，远程改为 tcp://<ip>:5555
+ANTHROPIC_API_KEY=sk-ant-xxxxx   # 用户语音提问时必填
+NITROGEN_MOCK=1                  # 默认 1：仅测前端闭环；实机 NitroGen 时改为 0
+NITROGEN_SERVER=tcp://localhost:5555   # NITROGEN_MOCK=0 时生效
 ```
 
 ---
 
 ## 启动方式
 
-### Step 1：启动 NitroGen 推理服务（GPU 机器，Linux）
+### 仅测前端（默认，无需 NitroGen GPU）
 
 ```bash
+python run.py
+```
+
+默认 `NITROGEN_MOCK=1`（见 `config.py` / `.env.example`）：后端模拟 `perception` JSON，终端**不会**刷 `NitroGen timeout`。
+
+1. 探针：http://localhost:8000/probe → 运行全部（应 **10 步全绿**）
+2. 主应用：http://localhost:8000 → 选视频 → 开始分析 → 右侧调试面板应看到 intent/confidence 变化
+
+### Step 1（可选）：启动 NitroGen 推理服务（GPU 机器，Linux）
+
+仅在需要实机快系统时：
+
+```bash
+# .env 中先设 NITROGEN_MOCK=0
 # 在安装了 NitroGen 的 GPU 环境中
 python scripts/serve.py /path/to/nitrogen.pt --port 5555 --ctx 1
 ```

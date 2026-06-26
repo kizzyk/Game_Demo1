@@ -32,6 +32,12 @@ def _websocket_stack_ready() -> bool:
 
 
 if __name__ == "__main__":
+    from backend.config import get_config
+    from backend.nitrogen.factory import nitrogen_mock_enabled
+
+    cfg = get_config()
+    if nitrogen_mock_enabled(cfg):
+        logger.info("NitroGen: mock 模式（仅前端闭环，无 ZMQ）。实机推理请设 NITROGEN_MOCK=0")
     if not _websocket_stack_ready():
         logger.warning(
             "未检测到 websockets/wsproto：/ws 将返回 404。"

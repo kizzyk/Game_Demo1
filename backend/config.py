@@ -11,6 +11,7 @@ class Config:
     # ── NitroGen 连接 ─────────────────────────────────────────────────
     nitrogen_server: str = "tcp://localhost:5555"
     nitrogen_target_fps: float = 10.0    # 向 NitroGen 发送的帧率（推理约200ms/chunk）
+    nitrogen_mock: bool = True           # 无 GPU 时 True：模拟 perception，仅测前端闭环
 
     # ── 快系统：动作过滤阈值（2号负责调优）────────────────────────────
     fast_trigger_confidence: float = 0.75   # 快通道触发置信度下限

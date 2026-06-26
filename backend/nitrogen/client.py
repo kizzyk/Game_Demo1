@@ -31,6 +31,8 @@ class NitroGenClient:
       - RCVTIMEO=2000ms，超时后重连
     """
 
+    is_mock = False
+
     RECONNECT_DELAY = 2.0   # 超时后等待多久重连
 
     def __init__(self, server_addr: str = "tcp://localhost:5555",

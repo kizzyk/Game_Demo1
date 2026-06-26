@@ -96,7 +96,7 @@ python run.py
 | 7 | `push-pcm` | 推送 100ms 静音 PCM (`0x01`) | 否 |
 | 8 | `tts-roundtrip` | `POST /probe/tts-echo` → 收 JSON `tts` → 收 MP3 `0x03` → 发 `tts_done` | 是 |
 | 9 | `observer` | 第二条 WS 以 `observer` 注册 | 否 |
-| 10 | `perception` | 连推 5 帧，等待 `perception` JSON | 否 |
+| 10 | `perception` | 连推 5 帧，等待 `perception` JSON（mock 或实机） | 是 |
 
 ### 常见失败原因
 
@@ -106,23 +106,44 @@ python run.py
 | `start` | GameSession 初始化异常（依赖缺失、配置错误） |
 | `ws-register` | 防火墙、反向代理未配置 WebSocket |
 | `tts-roundtrip` | edge-tts 无法访问外网、合成超时；或探针在 POST 之后才监听 WS 导致丢消息（已修复） |
-| `perception` | NitroGen ZMQ 服务未启动或地址配置错误（**非关键**，显示警告） |
+| `perception` | live 模式下 NitroGen 未启动；mock 模式下检查是否已推帧 |
+
+---
+
+## 仅测前端（无 NitroGen GPU，推荐入门）
+
+默认已开启 **NitroGen 模拟模式**，无需 ZMQ 服务即可 **10 步探针全绿**：
+
+1. `pip install -r requirements.txt`
+2. `python run.py`（终端应出现 `NitroGen: mock 模式`）
+3. 打开 http://localhost:8000/probe → **运行全部探针**
+
+`GET /probe/health` 会返回 `"nitrogen_mode": "mock"`。感知步骤收到的是后端循环推送的演示 `perception` JSON，用于验证前端调试面板与 WebSocket 通路。
+
+接上真实 NitroGen 时，在 `.env` 设置：
+
+```
+NITROGEN_MOCK=0
+NITROGEN_SERVER=tcp://localhost:5555
+```
 
 ---
 
 ## 环境要求
 
-### 最低要求（验证 HTTP + WS + 推帧 + TTS）
+### 最低要求（验证 HTTP + WS + 推帧 + TTS + perception mock）
 
 - Python 依赖已安装：`pip install -r requirements.txt`
 - 能执行 `python run.py` 且无报错
 - 本机可访问 **edge-tts**（TTS 步骤需要外网）
+- **不需要** NitroGen GPU 服务（默认 mock）
 
-### 完整通过（含 NitroGen 感知步骤）
+### 完整通过（实机 NitroGen 感知）
 
 除上述外，还需：
 
-1. 启动 NitroGen 推理服务，例如：
+1. `.env` 中 `NITROGEN_MOCK=0`
+2. 启动 NitroGen 推理服务，例如：
    ```bash
    python scripts/serve.py /path/to/ng.pt --port 5555
    ```
@@ -301,7 +322,7 @@ curl -X POST http://localhost:8000/probe/tts-echo
 2. **`python run.py` 导入 whisper 报 TypeError (NoneType)** → 误装了 PyPI 包 `whisper`，应改为 `pip uninstall whisper -y` 后 `pip install openai-whisper`（见 `README.md`）。
 3. **探针「WebSocket 注册为主连接」失败 (~300ms)** → 最常见：后端日志出现 `No supported WebSocket library` 与 `GET /ws ... 404`，执行 `pip install "uvicorn[standard]" websockets`（或 `pip install -r requirements.txt`）后 **Ctrl+C 重启** `python run.py`。探针第 1 步健康检查也会报 `websocket_ready=false`。其他原因：后端崩溃、地址栏须为 `http://localhost:8000/probe`（勿用 `file://`）、F12 → Network → WS 看连接是否被拒绝。
 4. **TTS 步骤超时** → 检查 edge-tts 网络；查看后端日志是否有合成错误。
-5. **perception 警告** → 正常，若未部署 NitroGen；要消警告需启动 ZMQ 服务。
+5. **perception 失败** → mock 模式（默认）下应能通过；live 模式需启动 ZMQ 并设 `NITROGEN_MOCK=0`
 6. **Nginx 反代 ws-register 失败** → 需配置 WebSocket upgrade。
 7. **与主应用冲突** → 先停主应用会话或等探针跑完再开主页面；重复点「启动」会 `POST /start` 409（会话已在运行，可忽略）。
 

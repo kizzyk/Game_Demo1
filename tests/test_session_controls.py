@@ -14,7 +14,7 @@ from backend.fast.event import EventType
 
 @pytest.fixture
 def session():
-    with patch.object(main_module, "NitroGenClient") as mock_nitro_cls, \
+    with patch.object(main_module, "create_nitrogen_client") as mock_nitro_factory, \
          patch.object(main_module, "ASRHandler") as mock_asr_cls, \
          patch.object(main_module, "TTSEngine"), \
          patch.object(main_module, "get_config") as mock_cfg:
@@ -49,7 +49,7 @@ def session():
         mock_asr_cls.return_value = mock_asr
 
         mock_nitro = MagicMock()
-        mock_nitro_cls.return_value = mock_nitro
+        mock_nitro_factory.return_value = mock_nitro
 
         gs = main_module.GameSession()
         gs.tts_queue = MagicMock()

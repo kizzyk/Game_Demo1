@@ -54,7 +54,7 @@ def _websocket_stack_ready() -> bool:
 
 from backend.config import get_config
 from backend.video.frame_buffer import FrameBuffer          # Fix 11
-from backend.nitrogen.client import NitroGenClient
+from backend.nitrogen.factory import create_nitrogen_client, nitrogen_mock_enabled
 from backend.fast.action_filter import ActionFilter
 from backend.fast.templates import render_fast
 from backend.fast.event import EventType, GameEvent
@@ -158,9 +158,7 @@ class GameSession:
         # Fix 11：FrameBuffer 接收前端推帧
         self.frame_buffer = FrameBuffer()
 
-        self.nitrogen = NitroGenClient(
-            server_addr=os.getenv("NITROGEN_SERVER", cfg.nitrogen_server)
-        )
+        self.nitrogen = create_nitrogen_client(cfg)
         self.action_filter = ActionFilter(
             confidence_threshold=cfg.fast_trigger_confidence,
             sustained_danger_sec=cfg.sustained_danger_sec,
@@ -505,13 +503,16 @@ async def probe_health():
     nitro = None
     if _session is not None:
         nitro = {
+            "mode": "mock" if getattr(_session.nitrogen, "is_mock", False) else "live",
             "running": _session.nitrogen._running,
             "inference_count": _session.nitrogen.inference_count,
             "timeout_count": _session.nitrogen.timeout_count,
         }
+    cfg = get_config()
     return {
         "ok": True,
         "websocket_ready": _websocket_stack_ready(),
+        "nitrogen_mode": "mock" if nitrogen_mock_enabled(cfg) else "live",
         "session_running": _session is not None and _session._running,
         "ws_clients": len(_ws_clients),
         "has_primary": _primary_ws is not None,
