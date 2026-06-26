@@ -109,9 +109,18 @@ NITROGEN_SERVER=tcp://localhost:5555   # NITROGEN_MOCK=0 时生效
 python run.py
 ```
 
-默认 `NITROGEN_MOCK=1`、`VLM_MOCK=1`（见 `.env.example`）：模拟 **steer/throttle/brake** 操控量 + mock VLM 回答，无需 GPU / Anthropic。
+默认 `NITROGEN_MOCK=1`：帧扫描后生成 **关键动作时间线 JSON**（见 [ACTIONS_TIMELINE.md](ACTIONS_TIMELINE.md)），作为 VLM 输入之一。
 
-**VLM 非常驻**：仅在用户提问或慢事件触发时运行（指示灯短暂亮起）。选择视频后自动 `POST /prepare` 预热 Whisper + TTS。
+**VLM（yunwu / Gemini）** 在 `.env` 配置（勿提交密钥）：
+
+```
+VLM_MOCK=0
+VLM_API_KEY=your-key
+VLM_API_BASE=https://yunwu.ai/v1
+VLM_MODEL=gemini-3.1-flash-lite:stable
+```
+
+VLM **非常驻**：仅在用户提问或慢事件时调用；录音时只跑 ASR。
 
 1. 探针：http://localhost:8000/probe → 运行全部（应 **10 步全绿**）
 2. 主应用：http://localhost:8000 → 选视频 → 开始分析 → 右侧调试面板应看到 intent/confidence 变化

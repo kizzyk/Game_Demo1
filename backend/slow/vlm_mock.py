@@ -21,27 +21,30 @@ async def call_vlm_mock(
     event: GameEvent,
     user_question: str = "",
     *,
+    actions_timeline_text: str = "",
     delay_sec: float = 0.35,
 ) -> str:
-    """模拟 VLM：短暂延迟后返回基于操控量的规则回复（用于前端闭环）。"""
+    """模拟 VLM：短暂延迟后返回基于操控量 + 时间线的规则回复。"""
     await asyncio.sleep(delay_sec)
     signal = event.perception
     ctrl = _control_hint(signal)
+    timeline_hint = (
+        actions_timeline_text[:120] + "…"
+        if len(actions_timeline_text) > 120
+        else actions_timeline_text
+    )
 
     if event.type == EventType.USER_QUESTION and user_question:
-        if signal.brake:
-            return f"你问得好，当前在刹车，先稳住再操作。{ctrl}"
-        if signal.throttle and signal.steer < -0.2:
-            return f"现在在向左给油，可以准备回正。你说：{user_question[:12]}"
-        if signal.throttle and signal.steer > 0.2:
-            return f"向右给油中，注意别过度转向。你说：{user_question[:12]}"
-        return f"收到：{user_question[:16]}。当前{ctrl}，保持节奏。"
+        base = f"收到：{user_question[:16]}。当前{ctrl}。"
+        if timeline_hint:
+            return base + " 已参考动作时间线。"
+        return base + " 保持节奏。"
 
     if signal.brake:
-        return "刚才该减速了，刹车时机可以更早一点。"
+        return "时间线显示有刹车点，可以再提前一点。"
     if signal.throttle and abs(signal.steer) > 0.3:
         side = "左" if signal.steer < 0 else "右"
-        return f"持续向{side}给油，注意出弯回正。"
+        return f"向{side}给油，注意看时间线里的转向段。"
     if signal.throttle:
-        return "直线油门可以，留意前方空隙。"
-    return "这段可以滑行观察，别急。"
+        return "直线油门段，保持节奏。"
+    return "可滑行观察下一段关键动作。"

@@ -31,6 +31,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 load_dotenv()
 logging.basicConfig(
@@ -65,7 +66,9 @@ from backend.tts.protocol import frame_tts_audio
 from backend.tts.queue import TTSQueue, Priority
 from backend.asr.handler import ASRHandler
 from backend import warmup
-from backend.slow.vlm_factory import vlm_mock_enabled
+from backend.actions.pipeline import build_mock_timeline, build_timeline_from_samples
+from backend.actions.timeline import ActionTimeline
+from backend.slow.vlm_factory import vlm_mock_enabled, vlm_provider
 
 import os
 
@@ -82,6 +85,7 @@ if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 _session: Optional["GameSession"] = None
+_action_timeline: Optional[ActionTimeline] = None
 _ws_clients: list[WebSocket] = []
 _ws_roles: dict[WebSocket, str] = {}   # "player" | "observer"
 _primary_ws: Optional[WebSocket] = None
@@ -171,6 +175,13 @@ class GameSession:
         self.conv_hist  = ConversationHistory()
         self.fast_hist  = FastHistory()
 
+        global _action_timeline
+        self.action_timeline: ActionTimeline = (
+            _action_timeline
+            if _action_timeline is not None
+            else build_mock_timeline(0.0)
+        )
+
         self.tts_engine  = TTSEngine(
             voice=cfg.tts_voice,
             rate=cfg.tts_rate,
@@ -212,6 +223,7 @@ class GameSession:
             vlm_model=cfg.vlm_model,
             vlm_max_tokens=cfg.vlm_max_tokens,
             get_seek_generation=lambda: self.asr_handler.seek_generation,
+            get_actions_timeline_text=self._actions_timeline_text,
             vlm_dedup_sec=cfg.vlm_dedup_sec,
             on_busy_change=self._on_vlm_busy_change,
         )
@@ -227,6 +239,9 @@ class GameSession:
         self._running = False
         self._analysis_paused = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _actions_timeline_text(self, t_sec: float) -> str:
+        return self.action_timeline.summary_near(t_sec)
 
     # ── 生命周期 ──────────────────────────────────────────────────────
 
@@ -530,7 +545,12 @@ async def probe_health():
         "ok": True,
         "websocket_ready": _websocket_stack_ready(),
         "nitrogen_mode": "mock" if nitrogen_mock_enabled(cfg) else "live",
-        "vlm_mode": "mock" if vlm_mock_enabled(cfg) else "live",
+        "vlm_mode": vlm_provider(cfg),
+        "vlm_model": cfg.vlm_model,
+        "actions_timeline_ready": _action_timeline is not None,
+        "actions_key_count": (
+            len(_action_timeline.key_actions) if _action_timeline else 0
+        ),
         "prepare": warmup.get_status(),
         "session_running": _session is not None and _session._running,
         "ws_clients": len(_ws_clients),
@@ -568,7 +588,8 @@ async def prepare_status():
     """视频选中后后台预热进度（Whisper + TTS 缓存）"""
     cfg = get_config()
     st = warmup.get_status()
-    st["vlm_mode"] = "mock" if vlm_mock_enabled(cfg) else "live"
+    st["vlm_mode"] = vlm_provider(cfg)
+    st["vlm_model"] = cfg.vlm_model
     return st
 
 
@@ -585,6 +606,75 @@ async def prepare_resources():
     if st["status"] != "loading":
         await warmup.start_background_warmup(cfg)
     return warmup.get_status()
+
+
+class FrameSampleIn(BaseModel):
+    t_sec: float = Field(ge=0)
+    jpeg_b64: str
+
+
+class IngestBatchIn(BaseModel):
+    duration_sec: float = Field(gt=0)
+    sample_interval_sec: float = Field(default=2.0, gt=0)
+    frames: list[FrameSampleIn]
+
+
+@app.get("/actions/timeline")
+async def get_actions_timeline():
+    """返回当前视频的关键动作 JSON 时间线（mock 或帧扫描结果）。"""
+    global _action_timeline
+    if _action_timeline is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "尚未生成动作时间线，请等待视频帧扫描完成"},
+        )
+    return _action_timeline.to_dict()
+
+
+@app.post("/actions/ingest-batch")
+async def ingest_action_frames(body: IngestBatchIn):
+    """
+    前端从视频抽帧后批量提交 → mock NitroGen 预测 → 过滤关键动作 → JSON。
+    """
+    import base64
+
+    global _action_timeline
+    samples: list[tuple[float, bytes | None]] = []
+    for fr in body.frames:
+        jpeg = None
+        if fr.jpeg_b64:
+            raw = fr.jpeg_b64
+            if "," in raw:
+                raw = raw.split(",", 1)[1]
+            try:
+                jpeg = base64.b64decode(raw)
+            except Exception:
+                jpeg = None
+        samples.append((fr.t_sec, jpeg))
+
+    _action_timeline = build_timeline_from_samples(
+        samples,
+        duration_sec=body.duration_sec,
+        sample_interval_sec=body.sample_interval_sec,
+    )
+    if _session is not None:
+        _session.action_timeline = _action_timeline
+
+    return {
+        "status": "ok",
+        "key_actions": len(_action_timeline.key_actions),
+        "timeline": _action_timeline.to_dict(),
+    }
+
+
+@app.post("/actions/build-mock")
+async def build_mock_actions(duration_sec: float = 120.0, interval: float = 2.0):
+    """无帧时按时间网格生成 mock 时间线（调试/探针用）。"""
+    global _action_timeline
+    _action_timeline = build_mock_timeline(duration_sec, interval)
+    if _session is not None:
+        _session.action_timeline = _action_timeline
+    return _action_timeline.to_dict()
 
 
 @app.post("/start")

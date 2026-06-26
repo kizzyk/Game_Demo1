@@ -77,8 +77,84 @@ fileInput.addEventListener('change', e => {
   playerArea.style.display = 'flex';
 
   videoPlayer.src = URL.createObjectURL(file);
-  startBackendPrepare();
 });
+
+function canvasToDataUrl(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (!blob) return reject(new Error('canvas toBlob failed'));
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    }, 'image/jpeg', 0.85);
+  });
+}
+
+function waitVideoSeeked() {
+  return new Promise(resolve => {
+    videoPlayer.addEventListener('seeked', () => resolve(), { once: true });
+  });
+}
+
+/** 从视频均匀抽帧 → 后端 mock NitroGen → 关键动作 JSON */
+async function scanVideoForActionTimeline() {
+  const duration = videoPlayer.duration;
+  if (!duration || !isFinite(duration)) return;
+
+  const interval = 2.0;
+  const maxFrames = 90;
+  const savedTime = videoPlayer.currentTime;
+  const wasPaused = videoPlayer.paused;
+  videoPlayer.pause();
+
+  if (prepareStatus) {
+    prepareStatus.hidden = false;
+    prepareStatus.textContent = '正在扫描视频帧，生成关键动作时间线…';
+    prepareStatus.className = 'prepare-status loading';
+  }
+
+  const frames = [];
+  try {
+    for (let t = 0; t < duration && frames.length < maxFrames; t += interval) {
+      videoPlayer.currentTime = Math.min(t, duration - 0.05);
+      await waitVideoSeeked();
+      captureCtx.drawImage(videoPlayer, 0, 0, 256, 256);
+      const jpeg_b64 = await canvasToDataUrl(captureCanvas);
+      frames.push({ t_sec: Math.round(t * 10) / 10, jpeg_b64 });
+    }
+
+    const r = await fetch('/actions/ingest-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        duration_sec: duration,
+        sample_interval_sec: interval,
+        frames,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+
+    const prep = await fetch('/prepare/status').then(x => x.json()).catch(() => ({}));
+    const vlmLabel = prep.vlm_model || prep.vlm_mode || 'vlm';
+    if (prepareStatus) {
+      prepareStatus.textContent =
+        `动作时间线：${data.key_actions} 个关键动作；VLM=${vlmLabel}（事件触发，非常驻）`;
+      prepareStatus.className = 'prepare-status ready';
+    }
+    console.log('Action timeline', data.timeline);
+  } catch (err) {
+    console.warn('Action timeline scan failed', err);
+    if (prepareStatus) {
+      prepareStatus.textContent = `动作时间线失败: ${err.message}`;
+      prepareStatus.className = 'prepare-status error';
+    }
+  } finally {
+    videoPlayer.currentTime = savedTime;
+    if (!wasPaused) videoPlayer.play().catch(() => {});
+  }
+}
 
 /** 选视频后即预热 Whisper/TTS（VLM 仅在提问或慢事件时短时触发，非常驻） */
 async function startBackendPrepare() {
@@ -94,7 +170,8 @@ async function startBackendPrepare() {
       const r = await fetch('/prepare/status');
       const st = await r.json();
       if (st.status === 'ready') {
-        prepareStatus.textContent = `模型已就绪（VLM: ${st.vlm_mode || 'mock'}，事件触发）`;
+        prepareStatus.textContent =
+          `Whisper/TTS 就绪；VLM=${st.vlm_model || st.vlm_mode}（提问时触发）`;
         prepareStatus.className = 'prepare-status ready';
         return;
       }
@@ -160,10 +237,11 @@ btnClearChat.addEventListener('click', () => {
   }
 });
 
-// ── 视频元数据加载完成 → 通知后端 ─────────────────────────────────────
+// ── 视频元数据加载完成 → 预热 + 抽帧生成动作时间线 ───────────────────
 videoPlayer.addEventListener('loadedmetadata', () => {
-  // 视频就绪，等用户点"开始分析"后通过 WS 发送时长
-  // （此时 WS 可能还未建立，实际发送在 ws.onopen 后由帧捕获时序保证）
+  if (clientMode !== 'player') return;
+  startBackendPrepare();
+  scanVideoForActionTimeline();
 });
 
 // ── WebSocket ─────────────────────────────────────────────────────────

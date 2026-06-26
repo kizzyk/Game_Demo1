@@ -40,6 +40,7 @@ class VLMRequestManager:
         vlm_model: str = "claude-sonnet-4-6",
         vlm_max_tokens: int = 120,
         get_seek_generation: Optional[Callable[[], int]] = None,
+        get_actions_timeline_text: Optional[Callable[[float], str]] = None,
         vlm_dedup_sec: float = 5.0,
         on_busy_change: Optional[Callable[[bool], None]] = None,
     ):
@@ -50,6 +51,7 @@ class VLMRequestManager:
         self._model     = vlm_model
         self._max_tokens = vlm_max_tokens
         self._get_seek_generation = get_seek_generation
+        self._get_actions_timeline_text = get_actions_timeline_text
         self._vlm_dedup_sec = vlm_dedup_sec
         self._on_busy_change = on_busy_change
 
@@ -128,11 +130,16 @@ class VLMRequestManager:
             event    = args["event"]
             is_user_q = (event.type == EventType.USER_QUESTION)
 
+            actions_text = ""
+            if self._get_actions_timeline_text:
+                actions_text = self._get_actions_timeline_text(event.timestamp)
+
             text = await call_vlm(
                 event=event,
                 frame=args["frame"],
                 ctx_summary=args["ctx_snapshot"],
                 last_fast_text=args["fast_recent"],
+                actions_timeline_text=actions_text,
                 user_question=event.user_text if is_user_q else "",
                 conversation_history=args["conv_messages"],
                 model=self._model,
