@@ -77,7 +77,7 @@ from backend.slow.vlm_factory import vlm_mock_enabled, vlm_provider
 
 import os
 
-app = FastAPI(title="NitroGen Game Coach")
+app = FastAPI(title="陪玩")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -228,6 +228,7 @@ class GameSession:
             tts_engine=self.tts_engine,
             asr_handler=self.asr_handler,
             inter_gap=cfg.tts_inter_utterance_gap,
+            user_inter_gap=cfg.tts_user_inter_gap,
             fallback_margin=cfg.tts_done_fallback_margin,
             broadcast_audio=self._broadcast_tts_audio,
             max_age={
@@ -252,7 +253,8 @@ class GameSession:
         )
 
         self.tts_queue.set_callbacks(
-            on_start=self._on_tts_start,
+            on_start=self._on_tts_subtitle,
+            on_playback=self._on_tts_playback,
             on_end=self._on_tts_end,
             on_interrupt=self._on_tts_interrupt,
         )
@@ -494,15 +496,26 @@ class GameSession:
         logger.info("Barge-in: user speech interrupted TTS")
         self.tts_queue.barge_in_interrupt()
 
-    def _on_tts_start(self, text: str, channel: str, utterance_id: int):
-        """TTS 开始播报 → 广播 JSON 事件（供前端更新 UI，在 MP3 之前）"""
+    def _on_tts_subtitle(self, text: str, channel: str, utterance_id: int):
+        """字幕先出（合成中），此时不 mute 麦克风。"""
         self._schedule(self._broadcast({
             "type":          "tts",
             "utterance_id":  utterance_id,
             "channel":       channel,
             "text":          text,
             "video_time":    round(self.frame_buffer.video_position, 2),
+            "playing":       False,
+            "synthesizing":  True,
+        }))
+
+    def _on_tts_playback(self, utterance_id: int, channel: str):
+        """MP3 就绪、即将播放 → 此时才 mute 麦克风。"""
+        self._schedule(self._broadcast({
+            "type":          "tts",
+            "utterance_id":  utterance_id,
+            "channel":       channel,
             "playing":       True,
+            "synthesizing":  False,
         }))
 
     def _on_tts_interrupt(self, utterance_id: int):
@@ -554,7 +567,7 @@ async def index():
     html_path = FRONTEND_DIR / "index.html"
     if html_path.exists():
         return HTMLResponse(html_path.read_text(encoding="utf-8"))
-    return HTMLResponse("<h1>NitroGen Game Coach</h1>")
+    return HTMLResponse("<h1>陪玩</h1>")
 
 
 @app.get("/probe")

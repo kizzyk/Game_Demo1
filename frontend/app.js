@@ -469,10 +469,14 @@ function handleServerMessage(msg) {
       break;
 
     case 'tts':
-      addChatMessage(msg.channel, msg.text, msg.video_time, msg.utterance_id);
+      if (msg.text) {
+        addChatMessage(msg.channel, msg.text, msg.video_time, msg.utterance_id);
+      }
       if (msg.playing && msg.utterance_id != null) {
         pendingUtteranceId = msg.utterance_id;
-        ttsStatus.textContent = `▶ ${channelLabel(msg.channel)}: "${truncate(msg.text, 20)}"`;
+        ttsStatus.textContent = `▶ ${channelLabel(msg.channel)}: "${truncate(msg.text || '', 20)}"`;
+      } else if (msg.synthesizing) {
+        ttsStatus.textContent = '🔊 正在合成语音…';
       }
       break;
 
@@ -885,7 +889,7 @@ function stopMicrophone() {
 }
 
 function initObserverMode() {
-  document.querySelector('.title').textContent = 'NitroGen 游戏语音教练（旁观）';
+  document.querySelector('.title').textContent = '陪玩（旁观）';
   const linkObs = $('link-observer');
   if (linkObs) linkObs.style.display = 'none';
   uploadArea.innerHTML = `

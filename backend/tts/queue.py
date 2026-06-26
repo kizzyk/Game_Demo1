@@ -2,7 +2,8 @@
 优先级 TTS 队列：同一时间只播一条，USER_ANSWER 可打断其他，
 过期内容自动丢弃，与 ASRHandler 联动实现 mute/unmute。
 
-播放完成：以前端 tts_done 为主，估算时长 + margin 为 fallback。
+时序：先 edge-tts 合成 → MP3 就绪后再 mute ASR 并下发播放，
+避免「字幕已出但语音迟迟不来」期间误触发 barge-in 打断。
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ class TTSQueue:
         tts_engine: "TTSEngine",
         asr_handler: Optional["ASRHandler"] = None,
         inter_gap: float = 0.8,
+        user_inter_gap: float = 0.15,
         fallback_margin: float = 1.0,
         broadcast_audio: Optional[Callable[[int, bytes], None]] = None,
         max_age: Optional[dict[Priority, float]] = None,
@@ -63,6 +65,7 @@ class TTSQueue:
         self._tts   = tts_engine
         self._asr   = asr_handler
         self._gap   = inter_gap
+        self._user_gap = user_inter_gap
         self._fallback_margin = fallback_margin
         self._broadcast_audio = broadcast_audio
         self._max_age = dict(max_age) if max_age is not None else dict(MAX_AGE)
@@ -72,7 +75,8 @@ class TTSQueue:
         self._heap: list[TTSItem] = []
         self._lock = threading.Lock()
 
-        self._is_speaking   = False
+        self._is_speaking   = False   # 占用播报槽（合成中或播放中）
+        self._playback_active = False  # MP3 已下发、正在播放（barge-in 仅此时生效）
         self._current_item: Optional[TTSItem] = None
 
         self._utterance_id = 0
@@ -82,6 +86,7 @@ class TTSQueue:
         self._speak_token = 0
 
         self._on_speak_start: Optional[Callable] = None
+        self._on_playback_start: Optional[Callable] = None
         self._on_speak_end:   Optional[Callable] = None
         self._on_interrupt:   Optional[Callable] = None
 
@@ -91,11 +96,19 @@ class TTSQueue:
 
     @property
     def is_speaking(self) -> bool:
+        """是否正在实际播放语音（不含 edge-tts 合成等待阶段）。"""
         with self._lock:
-            return self._is_speaking
+            return self._playback_active
 
-    def set_callbacks(self, on_start=None, on_end=None, on_interrupt=None):
+    def set_callbacks(
+        self,
+        on_start=None,
+        on_playback=None,
+        on_end=None,
+        on_interrupt=None,
+    ):
         self._on_speak_start = on_start
+        self._on_playback_start = on_playback
         self._on_speak_end   = on_end
         self._on_interrupt   = on_interrupt
 
@@ -152,10 +165,26 @@ class TTSQueue:
     # ── 内部调度 ──────────────────────────────────────────────────────
 
     def _on_audio_data(self, mp3_bytes: bytes):
-        """TTSEngine 合成完成 → 带 utterance_id 广播"""
+        """TTSEngine 合成完成 → mute + 带 utterance_id 广播 MP3"""
         with self._lock:
             uid = self._pending_done_id
-        if uid is None or not self._broadcast_audio:
+            if uid is None or self._completion_handled:
+                return
+            channel = _priority_to_channel(
+                self._current_item.priority if self._current_item else Priority.SLOW_ADVICE,
+            )
+            self._playback_active = True
+
+        if self._asr:
+            self._asr.mute()
+
+        if self._on_playback_start:
+            try:
+                self._on_playback_start(uid, channel)
+            except Exception as e:
+                logger.error("TTS on_playback_start error: %s", e)
+
+        if not self._broadcast_audio:
             return
         try:
             self._broadcast_audio(uid, mp3_bytes)
@@ -181,6 +210,7 @@ class TTSQueue:
             if item is None:
                 return
             self._is_speaking = True
+            self._playback_active = False
             self._utterance_id += 1
             uid = self._utterance_id
             self._pending_done_id = uid
@@ -188,15 +218,13 @@ class TTSQueue:
             self._current_item = item
             self._speak_token += 1
             token = self._speak_token
-
-        if self._asr:
-            self._asr.mute()
+            synth_started = time.time()
 
         channel = _priority_to_channel(item.priority)
         if self._on_speak_start:
             self._on_speak_start(item.text, channel, uid)
 
-        logger.info("TTS speak [%s] #%d: %s", channel, uid, item.text)
+        logger.info("TTS synth [%s] #%d: %s", channel, uid, item.text)
 
         def is_cancelled() -> bool:
             return token != self._speak_token
@@ -204,6 +232,11 @@ class TTSQueue:
         def _on_dispatched(duration_est: float):
             if is_cancelled():
                 return
+            elapsed = time.time() - synth_started
+            logger.info(
+                "TTS ready [%s] #%d in %.2fs (est play %.2fs)",
+                channel, uid, elapsed, duration_est,
+            )
             self._schedule_fallback(uid, duration_est)
 
         def _on_error():
@@ -228,6 +261,7 @@ class TTSQueue:
         self._fallback_timer.start()
 
     def _on_playback_done(self, utterance_id: int, source: str = "client"):
+        finished_priority: Optional[Priority] = None
         with self._lock:
             if utterance_id != self._pending_done_id:
                 logger.debug("TTS done ignored (stale #%d, pending #%s, src=%s)",
@@ -236,10 +270,13 @@ class TTSQueue:
             if self._completion_handled:
                 return
             self._completion_handled = True
+            if self._current_item is not None:
+                finished_priority = self._current_item.priority
 
         self._cancel_fallback_timer()
         with self._lock:
             self._is_speaking  = False
+            self._playback_active = False
             self._current_item = None
             self._pending_done_id = None
 
@@ -251,12 +288,17 @@ class TTSQueue:
         if self._on_speak_end:
             self._on_speak_end()
 
-        threading.Timer(self._gap, self._speak_next).start()
+        gap = (
+            self._user_gap
+            if finished_priority == Priority.USER_ANSWER
+            else self._gap
+        )
+        threading.Timer(gap, self._speak_next).start()
 
     def _interrupt(self, notify: bool = True, unmute_if_idle: bool = False):
         with self._lock:
             interrupted_id = self._pending_done_id
-            heap_has_items = len(self._heap) > 0
+            was_playback = self._playback_active
         if notify and interrupted_id is not None and self._on_interrupt:
             try:
                 self._on_interrupt(interrupted_id)
@@ -272,10 +314,13 @@ class TTSQueue:
         self._tts.stop()
         with self._lock:
             self._is_speaking  = False
+            self._playback_active = False
             self._current_item = None
             still_has_items = len(self._heap) > 0
 
         if self._asr and unmute_if_idle and not still_has_items:
+            self._asr.force_unmute()
+        elif self._asr and was_playback:
             self._asr.force_unmute()
 
     def _cancel_fallback_timer(self):

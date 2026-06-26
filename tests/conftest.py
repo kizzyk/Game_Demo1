@@ -102,6 +102,10 @@ def mock_tts_engine():
     engine.on_audio_data = None
 
     def _speak(text, is_cancelled=None, on_dispatched=None, on_error=None):
+        if is_cancelled and is_cancelled():
+            return
+        if engine.on_audio_data:
+            engine.on_audio_data(b"\xff\xfb" + b"\x00" * 64)
         if on_dispatched and not (is_cancelled and is_cancelled()):
             on_dispatched(0.5)
 

@@ -1,4 +1,4 @@
-# NitroGen 游戏语音教练 Demo
+# NitroGen 陪玩 Demo
 
 基于 [NitroGen](https://github.com/MineDojo/NitroGen)（500M DiT 游戏 AI）+ Claude VLM 构建的实时游戏语音教练。
 用户导入游戏视频，系统自动播放并分析，通过语音提供操作提示和策略建议，用户可随时开口提问。

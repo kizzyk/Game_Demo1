@@ -45,7 +45,7 @@ class TestTTSQueueImmediate:
         queue_idle.push("", Priority.FAST_HINT)
         mock_tts_engine.speak_async.assert_not_called()
 
-    def test_asr_muted_before_speak(self, queue_idle, mock_asr_handler):
+    def test_asr_muted_when_audio_ready(self, queue_idle, mock_asr_handler):
         queue_idle.push("测试", Priority.FAST_HINT)
         mock_asr_handler.mute.assert_called()
 
@@ -238,8 +238,10 @@ class TestTTSCallbacks:
         q = TTSQueue(mock_tts_engine, mock_asr_handler,
                      inter_gap=0.0, broadcast_audio=broadcast)
         q.push("测试", Priority.FAST_HINT)
-        mock_tts_engine.on_audio_data(b"mp3bytes")
-        broadcast.assert_called_once_with(1, b"mp3bytes")
+        broadcast.assert_called_once()
+        uid, mp3 = broadcast.call_args[0]
+        assert uid == 1
+        assert mp3
 
 
 class TestTTSQueueStaleSynthesis:
