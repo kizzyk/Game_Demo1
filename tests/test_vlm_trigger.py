@@ -227,3 +227,43 @@ class TestVLMDedupAndBusy:
 
         asyncio.run(_run())
         assert tts.push.call_count == 2
+
+
+class TestVLMFailureFallback:
+    def test_user_question_failure_pushes_fallback_without_name_error(self):
+        from backend.slow.trigger import VLMRequestManager
+        from backend.tts.queue import Priority
+
+        tts = MagicMock()
+        ctx = MagicMock()
+        ctx.summarize.return_value = ""
+        fast_hist = MagicMock()
+        fast_hist.get_recent_summary.return_value = None
+        conv = MagicMock()
+        errors: list[str] = []
+
+        mgr = VLMRequestManager(
+            tts_queue=tts,
+            context_buffer=ctx,
+            fast_history=fast_hist,
+            conversation_history=conv,
+            on_user_error=errors.append,
+            min_busy_display_sec=0.0,
+        )
+        frame = MagicMock()
+        event = make_user_event()
+
+        async def _run():
+            with patch(
+                "backend.slow.trigger.call_vlm",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("network down"),
+            ):
+                await mgr.submit(event, frame)
+                await asyncio.sleep(0.05)
+
+        asyncio.run(_run())
+        tts.push.assert_called_once_with(
+            "抱歉，我没听清，请再说一次。", Priority.USER_ANSWER,
+        )
+        assert errors and "network down" in errors[0]

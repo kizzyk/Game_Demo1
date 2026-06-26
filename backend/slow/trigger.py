@@ -188,7 +188,7 @@ class VLMRequestManager:
                         self._on_user_error(f"VLM 调用失败: {e}")
                     except Exception as cb_err:
                         logger.error("VLM on_user_error callback failed: %s", cb_err)
-                self._tts.push("抱歉，我没听清，请再说一次。", Priority.USER_ANSWER)
+                self._tts.push("抱歉，我没听清，请再说一次。", args["priority"])
 
         finally:
             if self._pending:
