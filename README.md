@@ -142,6 +142,25 @@ pip install openai-whisper
 python -c "import whisper; print(whisper.__file__); print(hasattr(whisper,'load_model'))"
 ```
 
+#### WebSocket 连接失败：`GET /ws` 404 / `No supported WebSocket library`
+
+若终端出现：
+
+```
+WARNING: No supported WebSocket library detected. Please use "pip install 'uvicorn[standard]'"
+INFO: ... "GET /ws HTTP/1.1" 404 Not Found
+```
+
+说明 **未安装 WebSocket 依赖**，探针和主应用的 WebSocket 都会失败。执行：
+
+```powershell
+pip install "uvicorn[standard]" websockets
+# 或
+pip install -r requirements.txt
+```
+
+安装后 **Ctrl+C 重启** `python run.py`，再跑探针。
+
 ### Step 3：打开前端页面
 
 浏览器访问：`http://localhost:8000`
