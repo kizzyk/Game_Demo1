@@ -132,7 +132,7 @@ python run.py
 
 **旁观模式**：主页面开始分析后，访问 `http://localhost:8000/?mode=observer` 可只读查看对话与调试信号（不推帧、不收音）。
 
-**E2E 链路探针**：访问 `http://localhost:8000/probe` 在浏览器中自动验证 HTTP → WebSocket → 推帧 → TTS 握手。加 `?autorun=1` 可页面加载后自动运行；完成后读取 `window.__PROBE_RESULT__`。
+**E2E 链路探针**：访问 `http://localhost:8000/probe` 在浏览器中自动验证 HTTP → WebSocket → 推帧 → TTS 握手。详细说明见 **[PROBE.md](PROBE.md)**。
 
 ---
 
