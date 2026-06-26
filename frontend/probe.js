@@ -308,7 +308,8 @@ async function runAllProbes() {
           '服务端未安装 websockets：请执行 pip install "uvicorn[standard]" websockets 后重启 python run.py'
         );
       }
-      const mode = data.nitrogen_mode === 'mock' ? 'mock(前端闭环)' : 'live';
+      const backend = data.nitrogen_backend || data.nitrogen_mode || '?';
+      const mode = backend === 'mock' ? 'mock(前端闭环)' : backend;
       return `session=${data.session_running}, ws=${data.ws_clients}, nitrogen=${mode}`;
     },
     status: async () => {
@@ -324,11 +325,14 @@ async function runAllProbes() {
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
       probeStartedSession = true;
       btnStopSession.disabled = false;
-      const mode = data.nitrogen_mode || '?';
-      if (mode === 'live') {
-        return `新会话已启动 (nitrogen=live，perception 需 ZMQ；前端测试请设 NITROGEN_MOCK=1 并重启)`;
+      const backend = data.nitrogen_backend || data.nitrogen_mode || '?';
+      if (backend === 'fast_api') {
+        return `新会话已启动 (nitrogen=fast_api，需 SSH 隧道 + 远端 /predict)`;
       }
-      return `新会话已启动 (nitrogen=${mode})`;
+      if (backend === 'zmq' || data.nitrogen_mode === 'live') {
+        return `新会话已启动 (nitrogen=zmq，perception 需 ZMQ serve)`;
+      }
+      return `新会话已启动 (nitrogen=${backend})`;
     },
     'ws-register': async () => {
       await closeProbeSockets();

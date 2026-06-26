@@ -122,8 +122,21 @@ python run.py
 
 接上真实 NitroGen 时，在 `.env` 设置：
 
+**推荐（action_fast_system HTTP）：**
+
 ```
 NITROGEN_MOCK=0
+NITROGEN_BACKEND=fast_api
+NITROGEN_FAST_API_URL=http://localhost:8000
+```
+
+先按 [action_fast_system/README.md](action_fast_system/README.md) 建立 SSH 隧道。
+
+**旧路径（ZMQ）：**
+
+```
+NITROGEN_MOCK=0
+NITROGEN_BACKEND=zmq
 NITROGEN_SERVER=tcp://localhost:5555
 ```
 
@@ -143,14 +156,8 @@ NITROGEN_SERVER=tcp://localhost:5555
 除上述外，还需：
 
 1. `.env` 中 `NITROGEN_MOCK=0`
-2. 启动 NitroGen 推理服务，例如：
-   ```bash
-   python scripts/serve.py /path/to/ng.pt --port 5555
-   ```
-2. `.env` 中配置正确的 ZMQ 地址：
-   ```
-   NITROGEN_SERVER=tcp://localhost:5555
-   ```
+2. **推荐** `NITROGEN_BACKEND=fast_api`，按 `action_fast_system/README.md` 起 SSH 隧道并确认远端 `/predict` 可达
+3. 或 **旧路径** ZMQ：启动 `scripts/serve.py` 并设 `NITROGEN_BACKEND=zmq`、`NITROGEN_SERVER=tcp://localhost:5555`
 
 ### 不需要
 

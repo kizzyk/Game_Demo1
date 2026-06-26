@@ -35,7 +35,10 @@ demo/
 │   │   ├── frame_buffer.py      # ★ 接收前端推帧，供 NitroGen 读取（Fix 11）
 │   │   └── frame_pipe.py        # 备用：cv2 本地读帧（当前未被主流程使用）
 │   ├── nitrogen/
-│   │   ├── client.py            # ZMQ 客户端，异步推理循环
+│   │   ├── client.py            # ZMQ 客户端（旧路径）
+│   │   ├── fast_api_client.py   # action_fast_system HTTP /predict
+│   │   ├── fast_api_parser.py   # JSON → PerceptionSignal + VLM 摘要
+│   │   ├── factory.py           # mock | fast_api | zmq 路由
 │   │   └── parser.py            # action chunk → PerceptionSignal
 │   ├── fast/
 │   │   ├── event.py             # GameEvent / EventType 数据结构
@@ -54,8 +57,11 @@ demo/
 │   ├── index.html               # 页面结构
 │   ├── style.css                # 暗色主题样式
 │   └── app.js                   # WebSocket 客户端，麦克风采集，对话面板
+├── action_fast_system/          # 远端 NitroGen FastAPI 客户端与样例输出
+│   ├── README.md                # SSH 隧道 + /predict 用法
+│   └── run_inference.py
 ├── scripts/
-│   └── serve.py                 # NitroGen ZMQ 推理服务（GPU 机器上运行）
+│   └── serve.py                 # NitroGen ZMQ 推理服务（旧路径，GPU 机器）
 ├── run.py                       # 快速启动脚本
 ├── requirements.txt             # 需额外安装的依赖
 ├── .env                         # API Key 和服务地址配置
@@ -83,7 +89,8 @@ requirements.txt 中额外安装的包：
 | 包 | 版本 | 用途 |
 |----|------|------|
 | fastapi + uvicorn[standard] | — | **必填**，含 websockets，否则 `/ws` 404 |
-| pyzmq | 27.1.0 | NitroGen ZMQ 通信 |
+| httpx | — | NitroGen fast_api HTTP 通信 |
+| pyzmq | 27.1.0 | NitroGen ZMQ 通信（旧路径） |
 | opencv-python | 4.13.0 | 视频处理工具（frame_pipe.py 备用） |
 | anthropic | 0.112.0 | Claude VLM API |
 | openai-whisper | 20250625 | 本地语音识别 |
@@ -93,10 +100,30 @@ requirements.txt 中额外安装的包：
 
 ### 配置 .env
 
+复制 `.env.example` 为项目根目录（与 `run.py` 同级）的 `.env`：
+
 ```
-ANTHROPIC_API_KEY=sk-ant-xxxxx   # 用户语音提问时必填
-NITROGEN_MOCK=1                  # 默认 1：仅测前端闭环；实机 NitroGen 时改为 0
-NITROGEN_SERVER=tcp://localhost:5555   # NITROGEN_MOCK=0 时生效
+# VLM（yunwu / Gemini）
+VLM_MOCK=0
+VLM_API_KEY=your-key
+VLM_API_BASE=https://yunwu.ai/v1
+VLM_MODEL=gemini-3.1-flash-lite:stable
+
+# NitroGen（默认 mock，仅前端闭环）
+NITROGEN_MOCK=1
+FAST_TTS=0
+
+# 实机快系统（推荐 action_fast_system HTTP）：
+# NITROGEN_MOCK=0
+# NITROGEN_BACKEND=fast_api
+# NITROGEN_FAST_API_URL=http://localhost:8000
+
+# 旧 ZMQ 路径：
+# NITROGEN_BACKEND=zmq
+# NITROGEN_SERVER=tcp://localhost:5555
+
+# 可选：把快系统提示注入 VLM（默认关）
+# VLM_NITROGEN_INPUT=1
 ```
 
 ---
@@ -125,17 +152,28 @@ VLM **非常驻**：仅在用户提问或慢事件时调用；录音时只跑 AS
 1. 探针：http://localhost:8000/probe → 运行全部（应 **10 步全绿**）
 2. 主应用：http://localhost:8000 → 选视频 → 开始分析 → 右侧调试面板应看到 intent/confidence 变化
 
-### Step 1（可选）：启动 NitroGen 推理服务（GPU 机器，Linux）
+### Step 1（可选）：接上实机 NitroGen 快系统
 
-仅在需要实机快系统时：
+**推荐：action_fast_system（远端 FastAPI）**
+
+1. 按 [action_fast_system/README.md](action_fast_system/README.md) 在 GPU 机器上确认服务已启动，并在本机建立 SSH 隧道（本地 `8000` → 远端 FastAPI）。
+2. `.env` 配置：
+   ```
+   NITROGEN_MOCK=0
+   NITROGEN_BACKEND=fast_api
+   NITROGEN_FAST_API_URL=http://localhost:8000
+   NITROGEN_FAST_API_FPS=2.5
+   ```
+3. `python run.py` 终端应出现 `NitroGen: fast_api → http://localhost:8000`。
+
+**旧路径：ZMQ serve（GPU 机器，Linux）**
 
 ```bash
-# .env 中先设 NITROGEN_MOCK=0
-# 在安装了 NitroGen 的 GPU 环境中
+# .env: NITROGEN_MOCK=0, NITROGEN_BACKEND=zmq
 python scripts/serve.py /path/to/nitrogen.pt --port 5555 --ctx 1
 ```
 
-> 如果 NitroGen 在远程机器上，修改 `.env` 中 `NITROGEN_SERVER=tcp://<remote_ip>:5555`
+> 远程 ZMQ：`NITROGEN_SERVER=tcp://<remote_ip>:5555`
 
 ### Step 2：启动后端服务（本机，Windows）
 
