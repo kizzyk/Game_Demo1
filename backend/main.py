@@ -71,6 +71,16 @@ _ws_clients: list[WebSocket] = []
 _primary_ws: Optional[WebSocket] = None
 
 
+def _remove_dead_ws_clients(dead: list[WebSocket]) -> None:
+    """移除断开的 WebSocket；若主连接失效则提升下一个客户端。"""
+    global _primary_ws
+    for ws in dead:
+        if ws in _ws_clients:
+            _ws_clients.remove(ws)
+    if _primary_ws is not None and _primary_ws not in _ws_clients:
+        _primary_ws = _ws_clients[0] if _ws_clients else None
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # GameSession
 # ═══════════════════════════════════════════════════════════════════════
@@ -330,6 +340,11 @@ class GameSession:
         self.asr_handler.force_unmute()
         await self._broadcast({"type": "video_ended"})
 
+    async def on_clear_conversation(self):
+        """清空多轮对话历史（seek 时保留，由用户主动触发）"""
+        self.conv_hist.clear()
+        await self._broadcast({"type": "conversation_cleared"})
+
     # ── 帧与音频输入 ──────────────────────────────────────────────────
 
     def on_video_frame(self, jpeg_bytes: bytes, video_time: float):
@@ -369,9 +384,9 @@ class GameSession:
         self._schedule(self._broadcast({"type": "tts_end"}))
 
     def _broadcast_tts_audio(self, utterance_id: int, audio_bytes: bytes):
-        """将 MP3 打包 utterance_id 后广播给所有 WebSocket 客户端"""
+        """将 MP3 打包 utterance_id 后发送给主 WebSocket 客户端播放"""
         framed = frame_tts_audio(utterance_id, audio_bytes)
-        self._schedule(self._broadcast_binary(framed))
+        self._schedule(self._broadcast_binary(framed, primary_only=True))
 
     # ── 广播工具 ──────────────────────────────────────────────────────
 
@@ -382,21 +397,21 @@ class GameSession:
                 await ws.send_json(msg)
             except Exception:
                 dead.append(ws)
-        for ws in dead:
-            if ws in _ws_clients:
-                _ws_clients.remove(ws)
+        _remove_dead_ws_clients(dead)
 
-    async def _broadcast_binary(self, data: bytes):
-        """Fix 14：向所有客户端发送二进制数据（TTS 音频）"""
+    async def _broadcast_binary(self, data: bytes, *, primary_only: bool = False):
+        """Fix 14：向客户端发送二进制数据（TTS 音频默认仅主连接）"""
+        if primary_only and _primary_ws is not None:
+            targets = [_primary_ws]
+        else:
+            targets = list(self._ws_clients)
         dead = []
-        for ws in self._ws_clients:
+        for ws in targets:
             try:
                 await ws.send_bytes(data)
             except Exception:
                 dead.append(ws)
-        for ws in dead:
-            if ws in _ws_clients:
-                _ws_clients.remove(ws)
+        _remove_dead_ws_clients(dead)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -461,7 +476,14 @@ async def websocket_endpoint(ws: WebSocket):
 
     try:
         while True:
-            msg = await ws.receive()
+            try:
+                msg = await ws.receive()
+            except WebSocketDisconnect:
+                break
+            except RuntimeError as exc:
+                if "disconnect" in str(exc).lower():
+                    break
+                raise
 
             # ── 二进制消息 ────────────────────────────────────────────
             if "bytes" in msg and msg["bytes"]:
@@ -472,12 +494,16 @@ async def websocket_endpoint(ws: WebSocket):
                 msg_type = data[0]
 
                 if msg_type == 0x01:
-                    # PCM 音频 → ASR
+                    # PCM 音频 → ASR（仅主客户端）
+                    if ws is not _primary_ws:
+                        continue
                     if _session:
                         _session.on_audio_chunk(data[1:])
 
                 elif msg_type == 0x02:
-                    # 视频帧 → NitroGen
+                    # 视频帧 → NitroGen（仅主客户端）
+                    if ws is not _primary_ws:
+                        continue
                     if len(data) >= 9 and _session:
                         video_time = struct.unpack_from("<d", data, 1)[0]
                         jpeg_bytes = data[9:]
@@ -489,6 +515,10 @@ async def websocket_endpoint(ws: WebSocket):
                 try:
                     data = json.loads(msg["text"])
                     mtype = data.get("type")
+
+                    if ws is not _primary_ws and mtype not in (None,):
+                        logger.debug("Ignored %s from non-primary client", mtype)
+                        continue
 
                     if mtype == "video_ready" and _session:
                         await _session.on_video_ready(float(data.get("duration", 0)))
@@ -505,10 +535,10 @@ async def websocket_endpoint(ws: WebSocket):
                     elif mtype == "video_ended" and _session:
                         await _session.on_video_ended()
 
+                    elif mtype == "clear_conversation" and _session:
+                        await _session.on_clear_conversation()
+
                     elif mtype == "tts_done" and _session:
-                        if ws is not _primary_ws:
-                            logger.debug("tts_done ignored from non-primary client")
-                            continue
                         uid = int(data.get("utterance_id", -1))
                         if uid >= 0:
                             _session.tts_queue.on_client_tts_done(uid)
@@ -516,7 +546,7 @@ async def websocket_endpoint(ws: WebSocket):
                 except Exception as e:
                     logger.error("WS JSON error: %s", e)
 
-    except WebSocketDisconnect:
+    finally:
         if ws in _ws_clients:
             _ws_clients.remove(ws)
         if _primary_ws is ws:

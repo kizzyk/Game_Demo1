@@ -181,6 +181,8 @@ class VLMRequestManager:
                 pass
         self._pending = None
         self._current_task = None
+        self._last_event_type = None
+        self._last_submit_time = 0.0
         self._notify_busy(False)
 
     def _notify_busy(self, busy: bool):

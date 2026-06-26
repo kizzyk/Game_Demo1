@@ -89,14 +89,18 @@ class ActionFilter:
             return None
 
         # 全局最小间隔检查（用户提问不受此限制）
-        if video_time - self._last_any_trigger < global_min_interval:
+        if (self._last_any_trigger != float('-inf')
+                and video_time >= self._last_any_trigger
+                and video_time - self._last_any_trigger < global_min_interval):
             self._prev_signal = signal
             return None
 
-        # 单类事件冷却检查
+        # 单类事件冷却检查（video_time < last 表示 seek 回退，不应用冷却）
         last = self._last_trigger.get(event.type, float('-inf'))
         cooldown = self.COOLDOWNS.get(event.type, 3.0)
-        if video_time - last < cooldown:
+        if (last != float('-inf')
+                and video_time >= last
+                and video_time - last < cooldown):
             self._prev_signal = signal
             return None
 

@@ -39,6 +39,9 @@ def session():
         cfg.vad_silence_end_sec = 1.2
         cfg.tts_mute_tail_sec = 0.2
         cfg.nitrogen_target_fps = 10.0
+        cfg.fast_hint_expire_sec = 2.0
+        cfg.slow_max_queue_age = 8.0
+        cfg.vlm_dedup_sec = 5.0
         mock_cfg.return_value = cfg
 
         mock_asr = MagicMock()
@@ -60,6 +63,8 @@ def session():
 class TestGameSessionControls:
     def test_on_seek_resets_signal_and_time(self, session):
         session._analysis_paused = True
+        session.conv_hist.add_turn("问题", "回答")
+        session.fast_hist.record(1.0, "快提示")
         async def _run():
             await session.on_seek(42.5)
 
@@ -69,8 +74,20 @@ class TestGameSessionControls:
         session.asr_handler.force_unmute.assert_called_once()
         session.tts_queue.clear_and_stop.assert_called_once()
         session.vlm_manager.cancel_all.assert_called_once()
+        assert len(session.conv_hist) == 1
+        assert session.fast_hist.get_recent_summary(2.0) == "无"
         assert session.frame_buffer.video_position == 42.5
         assert session._analysis_paused is True
+
+    def test_on_clear_conversation(self, session):
+        session.conv_hist.add_turn("问题", "回答")
+        async def _run():
+            await session.on_clear_conversation()
+
+        asyncio.run(_run())
+        assert len(session.conv_hist) == 0
+        session._broadcast.assert_called_once()
+        assert session._broadcast.call_args[0][0]["type"] == "conversation_cleared"
 
     def test_on_seek_restores_analysis_running_after_seek(self, session):
         session._analysis_paused = False

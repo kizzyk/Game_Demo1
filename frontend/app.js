@@ -100,7 +100,12 @@ btnStop.addEventListener('click', async () => {
   addSystemMsg('分析已停止');
 });
 
-btnClearChat.addEventListener('click', () => { chatMessages.innerHTML = ''; });
+btnClearChat.addEventListener('click', () => {
+  chatMessages.innerHTML = '';
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'clear_conversation' }));
+  }
+});
 
 // ── 视频元数据加载完成 → 通知后端 ─────────────────────────────────────
 videoPlayer.addEventListener('loadedmetadata', () => {
@@ -208,6 +213,10 @@ function handleServerMessage(msg) {
     case 'video_ended':
       addSystemMsg('视频播放结束');
       ttsStatus.textContent = '🔇 待机';
+      break;
+
+    case 'conversation_cleared':
+      chatMessages.innerHTML = '';
       break;
   }
 }
@@ -363,42 +372,95 @@ function playTTSAudio(arrayBuffer, utteranceIdFromFrame) {
   highlightPlayingMessage(utteranceId);
 }
 
-// ── 麦克风采集（Web Audio API）────────────────────────────────────────
+// ── 麦克风采集（Web Audio API + AudioWorklet）────────────────────────
 async function startMicrophone() {
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        sampleRate: 16000,
         channelCount: 1,
         echoCancellation: true,
         noiseSuppression: true,
       }
     });
 
-    audioContext   = new AudioContext({ sampleRate: 16000 });
-    const source   = audioContext.createMediaStreamSource(mediaStream);
-    // bufferSize=1600 → 100ms @ 16kHz
-    audioProcessor = audioContext.createScriptProcessor(1600, 1, 1);
+    audioContext = new AudioContext();
+    await audioContext.resume();
 
-    audioProcessor.onaudioprocess = e => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const float32 = e.inputBuffer.getChannelData(0);
-      const pcm16   = float32ToPCM16(float32);
+    const source = audioContext.createMediaStreamSource(mediaStream);
+    const frameSize = Math.round(audioContext.sampleRate * 0.1);
 
-      // Fix 11 协议：PCM 消息加 0x01 前缀
-      const msg = new Uint8Array(1 + pcm16.byteLength);
-      msg[0] = 0x01;
-      msg.set(new Uint8Array(pcm16), 1);
-      ws.send(msg.buffer);
-    };
+    if (audioContext.audioWorklet) {
+      await audioContext.audioWorklet.addModule('/static/pcm-processor.worklet.js');
+      audioProcessor = new AudioWorkletNode(audioContext, 'pcm-processor', {
+        processorOptions: {
+          frameSize,
+          targetSampleRate: 16000,
+        },
+      });
+      audioProcessor.port.onmessage = e => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const pcm16 = float32ToPCM16(e.data);
+        const msg = new Uint8Array(1 + pcm16.byteLength);
+        msg[0] = 0x01;
+        msg.set(new Uint8Array(pcm16), 1);
+        ws.send(msg.buffer);
+      };
+      const silentGain = audioContext.createGain();
+      silentGain.gain.value = 0;
+      source.connect(audioProcessor);
+      audioProcessor.connect(silentGain);
+      silentGain.connect(audioContext.destination);
+    } else {
+      startMicrophoneScriptProcessor(source, frameSize);
+    }
 
-    source.connect(audioProcessor);
-    audioProcessor.connect(audioContext.destination);
-    console.log('Microphone started');
+    console.log('Microphone started @', audioContext.sampleRate, 'Hz');
   } catch (err) {
     console.error('Mic error:', err);
     micStatus.textContent = '🎤 无权限';
   }
+}
+
+/** ScriptProcessor 回退（旧浏览器）；不将麦克风路由到扬声器。 */
+function startMicrophoneScriptProcessor(source, frameSize) {
+  const bufferSize = Math.max(256, Math.min(16384, frameSize));
+  audioProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+
+  audioProcessor.onaudioprocess = e => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const float32 = e.inputBuffer.getChannelData(0);
+    const pcm16 = float32ToPCM16(
+      audioContext.sampleRate === 16000
+        ? float32
+        : resampleFloat32(float32, audioContext.sampleRate, 16000),
+    );
+    const msg = new Uint8Array(1 + pcm16.byteLength);
+    msg[0] = 0x01;
+    msg.set(new Uint8Array(pcm16), 1);
+    ws.send(msg.buffer);
+  };
+
+  const silentGain = audioContext.createGain();
+  silentGain.gain.value = 0;
+  source.connect(audioProcessor);
+  audioProcessor.connect(silentGain);
+  silentGain.connect(audioContext.destination);
+}
+
+function resampleFloat32(float32, inputRate, targetRate) {
+  if (inputRate === targetRate) return float32;
+  const ratio = inputRate / targetRate;
+  const outLen = Math.max(1, Math.round(float32.length / ratio));
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const src = i * ratio;
+    const idx = Math.floor(src);
+    const frac = src - idx;
+    const s0 = float32[idx] ?? 0;
+    const s1 = float32[idx + 1] ?? s0;
+    out[i] = s0 + frac * (s1 - s0);
+  }
+  return out;
 }
 
 function float32ToPCM16(float32) {
