@@ -534,11 +534,18 @@ class GameSession:
     # ── 帧与音频输入 ──────────────────────────────────────────────────
 
     def on_video_frame(self, jpeg_bytes: bytes, video_time: float):
-        """Fix 11：前端推帧（在 WebSocket 协程中调用）"""
-        self.frame_buffer.push(jpeg_bytes, video_time)
-        notify = getattr(self.nitrogen, "on_frame_pushed", None)
-        if callable(notify):
-            notify()
+        """Fix 11：前端推帧（JPEG 解码在线程池，避免阻塞 WebSocket 心跳）"""
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+
+        def _decode_and_push():
+            self.frame_buffer.push(jpeg_bytes, video_time)
+            notify = getattr(self.nitrogen, "on_frame_pushed", None)
+            if callable(notify):
+                notify()
+
+        loop.run_in_executor(None, _decode_and_push)
 
     def on_audio_chunk(self, pcm_bytes: bytes):
         """Fix 13：ASR 音频（非阻塞，立即返回）"""
@@ -815,6 +822,18 @@ async def ingest_action_frames(body: IngestBatchIn):
             "building": True,
         }
 
+    if _session is not None and _session._running:
+        logger.info(
+            "Defer action timeline build (%d frames) while analysis session is running",
+            len(samples),
+        )
+        return {
+            "status": "deferred",
+            "frames": len(samples),
+            "building": False,
+            "reason": "session_running",
+        }
+
     _timeline_building = True
 
     def _build_sync():
@@ -1020,7 +1039,11 @@ async def websocket_endpoint(ws: WebSocket):
         if _primary_ws is ws:
             _primary_ws = None
             _reassign_primary_from_players()
-        logger.info("WebSocket disconnected (total: %d)", len(_ws_clients))
+        close_code = getattr(ws, "close_code", None)
+        logger.info(
+            "WebSocket disconnected (total: %d, primary_lost=%s, code=%s)",
+            len(_ws_clients), was_primary, close_code,
+        )
 
         if was_primary and _primary_ws is not None:
             await _send_session_role(_primary_ws)

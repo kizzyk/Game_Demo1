@@ -385,7 +385,11 @@ class ASRHandler:
             return
 
         arr_f32 = arr.astype(np.float32) / 32768.0
-        logger.debug("ASR queued %.1fs audio for transcription", len(arr_f32) / 16000)
+        peak = float(np.max(np.abs(arr_f32))) if arr_f32.size else 0.0
+        logger.info(
+            "ASR queued %.2fs audio for transcription (peak=%.3f)",
+            len(arr_f32) / 16000, peak,
+        )
 
         try:
             gen = self._seek_generation
@@ -398,11 +402,33 @@ class ASRHandler:
             self._set_activity_unlocked("listening")
 
     def _transcribe(self, arr: np.ndarray) -> str:
+        duration_sec = len(arr) / 16000.0
+        peak = float(np.max(np.abs(arr))) if arr.size else 0.0
         if self._engine_type == "faster-whisper":
-            segments, _ = self.model.transcribe(arr, language=self.language)
-            return "".join(s.text for s in segments).strip()
+            segments, info = self.model.transcribe(
+                arr,
+                language=self.language,
+                condition_on_previous_text=False,
+                vad_filter=True,
+                no_speech_threshold=0.5,
+            )
+            text = "".join(s.text for s in segments).strip()
+            if not text:
+                logger.info(
+                    "ASR empty (faster-whisper): %.2fs audio peak=%.4f lang_prob=%.2f",
+                    duration_sec,
+                    peak,
+                    getattr(info, "language_probability", 0.0),
+                )
+            return text
         result = self.model.transcribe(arr, language=self.language, fp16=False)
-        return result["text"].strip()
+        text = result["text"].strip()
+        if not text:
+            logger.info(
+                "ASR empty (openai-whisper): %.2fs audio peak=%.4f",
+                duration_sec, peak,
+            )
+        return text
 
     def _transcription_loop(self):
         while True:

@@ -509,8 +509,8 @@ function connectWebSocket() {
     ws.send(JSON.stringify({ type: 'register', role: clientMode }));
   };
 
-  ws.onclose = () => {
-    console.log('WebSocket closed');
+  ws.onclose = (ev) => {
+    console.log('WebSocket closed', ev.code, ev.reason || '');
     stopFrameCapture();
     if (!isAnalysisRunning) {
       setMicDisconnected();
@@ -605,6 +605,7 @@ function handleServerMessage(msg) {
       $('dbg-horizon').textContent = (msg.horizon || []).join(' → ');
       $('dbg-time').textContent    = (msg.video_time ?? 0).toFixed(2) + 's';
       dotNitrogen.className = 'dot active';
+      dotNitrogen.title = `NitroGen：${msg.intent} @ ${msg.video_time}s`;
       break;
 
     case 'seek_done':
@@ -613,7 +614,10 @@ function handleServerMessage(msg) {
       break;
 
     case 'status':
-      if (msg.state === 'started') dotNitrogen.className = 'dot loading';
+      if (msg.state === 'started') {
+        dotNitrogen.className = 'dot loading';
+        dotNitrogen.title = 'NitroGen：等待首帧/首次推理';
+      }
       if (msg.state === 'user_question_no_frame') {
         addSystemMsg('画面未就绪，暂时无法回答，请稍后再问');
       }
