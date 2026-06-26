@@ -35,13 +35,19 @@ class TTSEngine:
         self.on_audio_data: Optional[Callable[[bytes], None]] = None
 
     def preload(self, texts: list[str] | None = None):
-        """预合成常用短语，存入内存缓存"""
+        """预合成常用短语（同步入口；在已有事件循环中请用 preload_async）"""
+        try:
+            asyncio.run(self.preload_async(texts))
+        except RuntimeError:
+            logger.warning(
+                "TTS preload skipped (event loop running); call preload_async instead"
+            )
+
+    async def preload_async(self, texts: list[str] | None = None):
+        """在 async 上下文中预合成常用短语，存入内存缓存"""
         targets = texts or PRELOAD_TEXTS
         for text in targets:
-            try:
-                asyncio.run(self._async_preload(text))
-            except RuntimeError:
-                logger.warning("TTS preload skipped (event loop conflict): %s", text)
+            await self._async_preload(text)
         logger.info("TTS preloaded %d phrases", len(self._cache))
 
     async def _async_preload(self, text: str):

@@ -39,6 +39,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _websocket_stack_ready() -> bool:
+    """uvicorn 需要 websockets 或 wsproto 才能处理 /ws 升级"""
+    try:
+        import websockets  # noqa: F401
+        return True
+    except ImportError:
+        try:
+            import wsproto  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
 from backend.config import get_config
 from backend.video.frame_buffer import FrameBuffer          # Fix 11
 from backend.nitrogen.client import NitroGenClient
@@ -215,7 +228,7 @@ class GameSession:
         """启动推理与分析循环（不再需要打开视频文件）"""
         self._loop = asyncio.get_running_loop()
         self.nitrogen.start(self.frame_buffer)   # Fix 11：传 FrameBuffer
-        self.tts_engine.preload()
+        await self.tts_engine.preload_async()
 
         self._running = True
         self._main_loop_task = asyncio.create_task(self._analysis_loop())
@@ -498,6 +511,7 @@ async def probe_health():
         }
     return {
         "ok": True,
+        "websocket_ready": _websocket_stack_ready(),
         "session_running": _session is not None and _session._running,
         "ws_clients": len(_ws_clients),
         "has_primary": _primary_ws is not None,

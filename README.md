@@ -82,6 +82,7 @@ requirements.txt 中额外安装的包：
 
 | 包 | 版本 | 用途 |
 |----|------|------|
+| fastapi + uvicorn[standard] | — | **必填**，含 websockets，否则 `/ws` 404 |
 | pyzmq | 27.1.0 | NitroGen ZMQ 通信 |
 | opencv-python | 4.13.0 | 视频处理工具（frame_pipe.py 备用） |
 | anthropic | 0.112.0 | Claude VLM API |
