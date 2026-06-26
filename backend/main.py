@@ -100,6 +100,7 @@ _timeline_building: bool = False
 _ws_clients: list[WebSocket] = []
 _ws_roles: dict[WebSocket, str] = {}   # "player" | "observer"
 _primary_ws: Optional[WebSocket] = None
+_pcm_drop_logged: bool = False
 
 
 @app.on_event("startup")
@@ -114,6 +115,11 @@ async def _on_startup():
         except Exception as e:
             logger.warning("SSH tunnel auto-start failed: %s", e)
     await warmup.start_background_warmup(cfg)
+    if not _websocket_stack_ready():
+        logger.warning(
+            "websockets 未安装：/ws 将无法升级，麦克风与推帧均不可用。"
+            "请执行: pip install websockets"
+        )
     logger.info(
         "Startup: vlm=%s model=%s key=%s",
         vlm_provider(cfg),
@@ -632,6 +638,11 @@ async def index():
     return HTMLResponse("<h1>陪玩</h1>")
 
 
+@app.get("/favicon.ico")
+async def favicon():
+    return HTMLResponse(status_code=204)
+
+
 @app.get("/probe")
 async def probe_page():
     """浏览器 E2E 链路探针页面"""
@@ -702,6 +713,15 @@ async def session_status():
     return {
         "running": running,
         "has_primary": _primary_ws is not None,
+        "ws_clients": len(_ws_clients),
+        "websocket_ready": _websocket_stack_ready(),
+        "pcm_chunks": (
+            _session._pcm_chunk_count if _session is not None else 0
+        ),
+        "asr_state": (
+            _session.asr_handler.activity_state
+            if _session is not None else None
+        ),
         "vlm_mode": vlm_provider(get_config()),
         "fast_tts_enabled": get_config().fast_tts_enabled,
     }
@@ -855,6 +875,8 @@ async def start_session():
     if _session:
         await _session.stop()
     _session = GameSession()
+    global _pcm_drop_logged
+    _pcm_drop_logged = False
     await _session.start()
     cfg = get_config()
     backend = nitrogen_mode_label(cfg)
@@ -927,6 +949,14 @@ async def websocket_endpoint(ws: WebSocket):
                         continue
                     if _session:
                         _session.on_audio_chunk(data[1:])
+                    else:
+                        global _pcm_drop_logged
+                        if not _pcm_drop_logged:
+                            _pcm_drop_logged = True
+                            logger.warning(
+                                "PCM received but no active session "
+                                "(请先 POST /start 再推麦克风)"
+                            )
 
                 elif msg_type == 0x02:
                     # 视频帧 → NitroGen（仅主客户端）

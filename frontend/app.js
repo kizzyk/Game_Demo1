@@ -44,6 +44,8 @@ let wsReconnectTimer = null;
 let wsReconnectAttempts = 0;
 const WS_RECONNECT_BASE_MS = 1000;
 const WS_RECONNECT_MAX_MS = 15000;
+const APP_BUILD = '20250625-mic';
+let pcmSentCount = 0;
 const dismissedUtteranceIds = new Set();
 let backendPreparePromise = null;
 let timelineScanPromise = null;
@@ -289,7 +291,15 @@ if (clientMode === 'player') {
     const prevLabel = btnStart.textContent;
     btnStart.disabled = true;
     btnStart.textContent = '启动中…';
+    // 必须在用户手势有效期内先申请麦克风，否则 await 预热后 AudioContext 会挂起
+    const micPrime = primeMicrophoneOnUserGesture().catch(err => {
+      console.error('mic prime:', err);
+      micStatus.textContent = '🎤 麦克风失败';
+      micStatus.className = 'error';
+      throw err;
+    });
     try {
+      await micPrime;
       const prepSt = await fetch('/prepare/status').then(r => r.json()).catch(() => ({}));
       if (prepSt.status !== 'ready') {
         btnStart.textContent = '预热中…';
@@ -461,14 +471,17 @@ async function applySessionRole(role) {
 async function ensureMicrophoneReady() {
   if (!isPrimaryClient) return;
   try {
-    if (!mediaStream || !audioContext || audioContext.state === 'closed') {
-      await startMicrophone();
-    } else if (audioContext.state === 'suspended') {
+    await primeMicrophoneOnUserGesture();
+    await attachMicPipeline();
+    if (audioContext?.state === 'suspended') {
       await audioContext.resume();
     }
     requestAsrState();
   } catch (err) {
     console.error('ensureMicrophoneReady:', err);
+    micStatus.textContent = '🎤 麦克风失败';
+    micStatus.className = 'error';
+    addSystemMsg(`麦克风错误：${err.message}`);
   }
 }
 
@@ -487,7 +500,8 @@ function connectWebSocket() {
   ws.binaryType = 'arraybuffer';   // Fix 14：接收 ArrayBuffer 而非 Blob
 
   ws.onopen = () => {
-    console.log('WebSocket connected');
+    console.log('WebSocket connected (build %s)', APP_BUILD);
+    pcmSentCount = 0;
     if (isAnalysisRunning && clientMode === 'player') {
       micStatus.textContent = '🎤 连接中…';
       micStatus.className = 'loading';
@@ -771,60 +785,103 @@ function playTTSAudio(arrayBuffer, utteranceIdFromFrame) {
 }
 
 // ── 麦克风采集（Web Audio API + AudioWorklet）────────────────────────
-async function startMicrophone() {
-  try {
+
+/** 在用户点击瞬间申请权限并激活 AudioContext（避免 await 后手势失效） */
+async function primeMicrophoneOnUserGesture() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error('当前浏览器不支持麦克风');
+  }
+  if (!mediaStream) {
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
         echoCancellation: true,
         noiseSuppression: false,
         autoGainControl: true,
-      }
+      },
     });
-
+  }
+  if (!audioContext || audioContext.state === 'closed') {
     audioContext = new AudioContext();
+  }
+  if (audioContext.state === 'suspended') {
     await audioContext.resume();
+  }
+  if (audioContext.state !== 'running') {
+    throw new Error(`AudioContext 未激活 (${audioContext.state})`);
+  }
+}
 
-    const source = audioContext.createMediaStreamSource(mediaStream);
-    const micGain = audioContext.createGain();
-    micGain.gain.value = 3.0;
-    const frameSize = Math.round(audioContext.sampleRate * 0.1);
+function sendPcmToServer(samples) {
+  if (!isPrimaryClient || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const pcm16 = float32ToPCM16(samples);
+  const msg = new Uint8Array(1 + pcm16.byteLength);
+  msg[0] = 0x01;
+  msg.set(new Uint8Array(pcm16), 1);
+  ws.send(msg.buffer);
+  pcmSentCount += 1;
+  if (pcmSentCount === 1) {
+    console.log('PCM: first chunk sent', pcm16.byteLength, 'bytes');
+  } else if (pcmSentCount % 100 === 0) {
+    console.log('PCM:', pcmSentCount, 'chunks sent');
+  }
+}
 
-    if (audioContext.audioWorklet) {
-      await audioContext.audioWorklet.addModule('/static/pcm-processor.worklet.js');
-      audioProcessor = new AudioWorkletNode(audioContext, 'pcm-processor', {
-        processorOptions: {
-          frameSize,
-          targetSampleRate: 16000,
-        },
-      });
-      audioProcessor.port.onmessage = e => {
-        if (!isPrimaryClient || !ws || ws.readyState !== WebSocket.OPEN) return;
-        const samples = e.data instanceof Float32Array
-          ? e.data
-          : new Float32Array(e.data);
-        if (!samples.length) return;
-        const pcm16 = float32ToPCM16(samples);
-        const msg = new Uint8Array(1 + pcm16.byteLength);
-        msg[0] = 0x01;
-        msg.set(new Uint8Array(pcm16), 1);
-        ws.send(msg.buffer);
-      };
-      const silentGain = audioContext.createGain();
-      silentGain.gain.value = 0;
-      source.connect(micGain);
-      micGain.connect(audioProcessor);
-      audioProcessor.connect(silentGain);
-      silentGain.connect(audioContext.destination);
-    } else {
-      startMicrophoneScriptProcessor(source, micGain, frameSize);
-    }
+async function attachMicPipeline() {
+  if (!mediaStream || !audioContext) {
+    throw new Error('麦克风未初始化');
+  }
+  if (audioContext.state === 'suspended') {
+    await audioContext.resume();
+  }
+  if (audioProcessor) {
+    return;
+  }
 
-    console.log('Microphone started @', audioContext.sampleRate, 'Hz');
+  const source = audioContext.createMediaStreamSource(mediaStream);
+  const micGain = audioContext.createGain();
+  micGain.gain.value = 3.0;
+  const frameSize = Math.round(audioContext.sampleRate * 0.1);
+  const workletUrl = new URL('/static/pcm-processor.worklet.js', location.origin);
+  workletUrl.searchParams.set('v', APP_BUILD);
+
+  if (audioContext.audioWorklet) {
+    await audioContext.audioWorklet.addModule(workletUrl.href);
+    audioProcessor = new AudioWorkletNode(audioContext, 'pcm-processor', {
+      processorOptions: {
+        frameSize,
+        targetSampleRate: 16000,
+      },
+    });
+    audioProcessor.port.onmessage = e => {
+      const samples = e.data instanceof Float32Array
+        ? e.data
+        : new Float32Array(e.data);
+      if (!samples.length) return;
+      sendPcmToServer(samples);
+    };
+    const silentGain = audioContext.createGain();
+    silentGain.gain.value = 0;
+    source.connect(micGain);
+    micGain.connect(audioProcessor);
+    audioProcessor.connect(silentGain);
+    silentGain.connect(audioContext.destination);
+  } else {
+    startMicrophoneScriptProcessor(source, micGain, frameSize);
+  }
+}
+
+async function startMicrophone() {
+  try {
+    await primeMicrophoneOnUserGesture();
+    await attachMicPipeline();
+    console.log('Microphone started @', audioContext.sampleRate, 'Hz, build', APP_BUILD);
     requestAsrState();
   } catch (err) {
     console.error('Mic error:', err);
     micStatus.textContent = '🎤 无权限';
+    micStatus.className = 'error';
+    throw err;
   }
 }
 
@@ -836,15 +893,11 @@ function startMicrophoneScriptProcessor(source, micGain, frameSize) {
   audioProcessor.onaudioprocess = e => {
     if (!isPrimaryClient || !ws || ws.readyState !== WebSocket.OPEN) return;
     const float32 = e.inputBuffer.getChannelData(0);
-    const pcm16 = float32ToPCM16(
+    sendPcmToServer(
       audioContext.sampleRate === 16000
         ? float32
         : resampleFloat32(float32, audioContext.sampleRate, 16000),
     );
-    const msg = new Uint8Array(1 + pcm16.byteLength);
-    msg[0] = 0x01;
-    msg.set(new Uint8Array(pcm16), 1);
-    ws.send(msg.buffer);
   };
 
   const silentGain = audioContext.createGain();
@@ -1027,6 +1080,7 @@ function disconnectAll() {
   stopFrameCapture();
   stopTTSAudio();
   dismissedUtteranceIds.clear();
+  pcmSentCount = 0;
   if (ws)              { ws.close(); ws = null; }
   stopMicrophone();
   dotNitrogen.className = 'dot';

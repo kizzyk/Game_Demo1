@@ -338,6 +338,8 @@ input[type="file"] { display: none; }
 /* ── 麦克风状态样式 ─────────────────────────────────────────────── */
 #mic-status.recording { color: var(--user); font-weight: 600; }
 #mic-status.muted     { color: var(--text-muted); }
+#mic-status.error     { color: #f96; font-weight: 600; }
+#mic-status.loading   { color: var(--text-muted); }
 
 /* ── 滚动条美化 ─────────────────────────────────────────────────── */
 ::-webkit-scrollbar            { width: 5px; }
