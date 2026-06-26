@@ -98,6 +98,7 @@ class TestWebSocketRegister:
     def test_observer_tts_done_ignored(self, ws_client):
         mock_session = MagicMock()
         mock_session._broadcast = AsyncMock()
+        mock_session.on_pause = AsyncMock()
         main_module._session = mock_session
 
         with ws_client.websocket_connect("/ws") as primary:

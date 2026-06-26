@@ -1108,8 +1108,9 @@ async def on_video_seek(self, new_time: float):
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/start` | POST | 启动分析会话（无需传视频路径，Fix 11） |
+| `/start` | POST | 启动分析会话（会话已运行时返回 409） |
 | `/stop`  | POST | 停止分析 |
+| `/session/status` | GET | 查询会话是否运行、是否有主连接 |
 
 ### 6.2 WebSocket 消息协议（Fix 11、14 后更新）
 

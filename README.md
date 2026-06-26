@@ -82,6 +82,7 @@ requirements.txt 中额外安装的包：
 
 | 包 | 版本 | 用途 |
 |----|------|------|
+| fastapi + uvicorn[standard] | — | **必填**，含 websockets，否则 `/ws` 404 |
 | pyzmq | 27.1.0 | NitroGen ZMQ 通信 |
 | opencv-python | 4.13.0 | 视频处理工具（frame_pipe.py 备用） |
 | anthropic | 0.112.0 | Claude VLM API |
@@ -141,6 +142,25 @@ pip install openai-whisper
 ```powershell
 python -c "import whisper; print(whisper.__file__); print(hasattr(whisper,'load_model'))"
 ```
+
+#### WebSocket 连接失败：`GET /ws` 404 / `No supported WebSocket library`
+
+若终端出现：
+
+```
+WARNING: No supported WebSocket library detected. Please use "pip install 'uvicorn[standard]'"
+INFO: ... "GET /ws HTTP/1.1" 404 Not Found
+```
+
+说明 **未安装 WebSocket 依赖**，探针和主应用的 WebSocket 都会失败。执行：
+
+```powershell
+pip install "uvicorn[standard]" websockets
+# 或
+pip install -r requirements.txt
+```
+
+安装后 **Ctrl+C 重启** `python run.py`，再跑探针。
 
 ### Step 3：打开前端页面
 

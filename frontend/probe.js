@@ -256,6 +256,11 @@ async function runAllProbes() {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       if (!data.ok) throw new Error('health ok=false');
+      if (data.websocket_ready === false) {
+        throw new Error(
+          '服务端未安装 websockets：请执行 pip install "uvicorn[standard]" websockets 后重启 python run.py'
+        );
+      }
       return `session=${data.session_running}, ws=${data.ws_clients}`;
     },
     status: async () => {

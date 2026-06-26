@@ -1,9 +1,12 @@
-# ── 已在 live_vision 环境中（无需重装） ─────────────────────────────
-# fastapi, uvicorn, websockets, numpy, pillow, pydub
-# python-dotenv, python-multipart, openai, starlette
+# ── 已在 live_vision 环境中（可能已有）──────────────────────────────
+# fastapi, numpy, pillow, pydub, python-dotenv, python-multipart
 
-# ── 需要额外安装（在 live_vision 环境中执行）────────────────────────
-# conda activate live_vision
+# ── Web 服务（必填：缺 websockets 时 /ws 会 404，探针 WebSocket 步骤失败）──
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+websockets>=12.0
+
+# ── 需要额外安装 ────────────────────────────────────────────────────
 # pip install -r requirements.txt
 
 # NitroGen 通信

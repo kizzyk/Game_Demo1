@@ -12,9 +12,31 @@
        python scripts/serve.py /path/to/ng.pt --port 5555
   4. 如果 NitroGen 在远程，修改 .env 中 NITROGEN_SERVER=tcp://<ip>:5555
 """
+import logging
+
 import uvicorn
 
+logger = logging.getLogger(__name__)
+
+
+def _websocket_stack_ready() -> bool:
+    try:
+        import websockets  # noqa: F401
+        return True
+    except ImportError:
+        try:
+            import wsproto  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+
 if __name__ == "__main__":
+    if not _websocket_stack_ready():
+        logger.warning(
+            "未检测到 websockets/wsproto：/ws 将返回 404。"
+            "请执行: pip install \"uvicorn[standard]\" websockets"
+        )
     uvicorn.run(
         "backend.main:app",
         host="0.0.0.0",

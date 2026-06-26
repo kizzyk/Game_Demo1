@@ -70,6 +70,7 @@ class TestProbeEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert data["ok"] is True
+        assert "websocket_ready" in data
         assert data["session_running"] is False
 
     def test_probe_tts_echo_without_session(self, client):
