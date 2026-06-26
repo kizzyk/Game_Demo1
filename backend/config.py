@@ -13,6 +13,11 @@ class Config:
     nitrogen_server: str = "tcp://localhost:5555"
     nitrogen_target_fps: float = 10.0    # 向 NitroGen 发送的帧率（推理约200ms/chunk）
     nitrogen_mock: bool = True           # 无 GPU 时 True：模拟 perception，仅测前端闭环
+    nitrogen_backend: str = "mock"       # mock | fast_api | zmq
+    nitrogen_fast_api_url: str = "http://localhost:8000"
+    nitrogen_fast_api_timeout_sec: float = 60.0
+    nitrogen_fast_api_reset_on_start: bool = True
+    nitrogen_fast_api_fps: float = 2.5   # 远端推理较慢，默认低于 10fps
     fast_tts_enabled: bool = True      # mock 模式下默认关闭，见 _apply_env
 
     # ── 快系统：动作过滤阈值（2号负责调优）────────────────────────────
@@ -96,6 +101,18 @@ def _apply_env(cfg: Config) -> None:
     mock = _env_bool("NITROGEN_MOCK")
     if mock is not None:
         cfg.nitrogen_mock = mock
+
+    if v := os.getenv("NITROGEN_BACKEND"):
+        cfg.nitrogen_backend = v.strip().lower()
+    if v := os.getenv("NITROGEN_FAST_API_URL"):
+        cfg.nitrogen_fast_api_url = v.strip()
+    if v := os.getenv("NITROGEN_FAST_API_TIMEOUT"):
+        cfg.nitrogen_fast_api_timeout_sec = float(v)
+    if v := os.getenv("NITROGEN_FAST_API_FPS"):
+        cfg.nitrogen_fast_api_fps = float(v)
+    reset = _env_bool("NITROGEN_FAST_API_RESET_ON_START")
+    if reset is not None:
+        cfg.nitrogen_fast_api_reset_on_start = reset
 
     if v := os.getenv("VLM_API_KEY"):
         cfg.vlm_api_key = v.strip()

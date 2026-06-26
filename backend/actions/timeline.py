@@ -55,8 +55,7 @@ class ActionTimeline:
         lines = []
         for a in items:
             lines.append(
-                f"  t={a.t_sec:.1f}s steer={a.steer:+.2f} "
-                f"throttle={a.throttle} brake={a.brake} "
-                f"intent={a.intent} conf={a.confidence:.0%} [{a.label}]"
+                f"  t={a.t_sec:.1f}s intent={a.intent} conf={a.confidence:.0%} "
+                f"[{a.label or '—'}]"
             )
         return "关键动作时间线（过滤后）:\n" + "\n".join(lines)

@@ -65,10 +65,16 @@ class PerceptionSignal:
     raw_guard_score: float  = 0.0
     raw_joystick_mag: float = 0.0
 
-    # 简化操控语义（mock / 下游 VLM 用）：左右摇杆一维 + 油门/刹车 0/1
-    steer: float = 0.0      # [-1, 1]，负左正右
-    throttle: int = 0       # 0/1
-    brake: int = 0          # 0/1
+    # 简化操控语义（调试面板兼容字段，非驾驶专用）
+    steer: float = 0.0      # [-1, 1]，左摇杆 X 分量
+    throttle: int = 0       # 0/1，常映射右扳机/确认键强度
+    brake: int = 0          # 0/1，常映射左扳机/防御键强度
+
+    # 快系统 HTTP 后处理（action_fast_system）可读摘要
+    hint_text: str = ""
+    is_action_change: bool = False
+    change_distance: float = 0.0
+    pressed_buttons: list[str] = field(default_factory=list)
 
 
 def parse_chunk(chunk: dict, btn_threshold: float = 0.5) -> PerceptionSignal:

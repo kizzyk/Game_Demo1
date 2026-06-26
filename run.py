@@ -38,11 +38,19 @@ def _websocket_stack_ready() -> bool:
 
 if __name__ == "__main__":
     from backend.config import reload_config_from_env
-    from backend.nitrogen.factory import nitrogen_mock_enabled
+    from backend.nitrogen.factory import nitrogen_mock_enabled, nitrogen_mode_label
 
     cfg = reload_config_from_env()
-    if nitrogen_mock_enabled(cfg):
-        logger.info("NitroGen: mock 模式（仅前端闭环，无 ZMQ）。实机推理请设 NITROGEN_MOCK=0")
+    backend = nitrogen_mode_label(cfg)
+    if backend == "mock":
+        logger.info("NitroGen: mock 模式（仅前端闭环）。实机请设 NITROGEN_MOCK=0")
+    elif backend == "fast_api":
+        logger.info(
+            "NitroGen: fast_api → %s（需 SSH 隧道，见 action_fast_system/README.md）",
+            cfg.nitrogen_fast_api_url,
+        )
+    else:
+        logger.info("NitroGen: ZMQ → %s", cfg.nitrogen_server)
     from backend.slow.vlm_factory import vlm_provider
     logger.info(
         "VLM: %s / %s（无 Key 时为 mock；真模型请设 VLM_MOCK=0 + VLM_API_KEY）",

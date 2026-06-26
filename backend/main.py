@@ -60,7 +60,12 @@ def _websocket_stack_ready() -> bool:
 
 from backend.config import get_config
 from backend.video.frame_buffer import FrameBuffer          # Fix 11
-from backend.nitrogen.factory import create_nitrogen_client, nitrogen_mock_enabled
+from backend.nitrogen.factory import (
+    create_nitrogen_client,
+    nitrogen_analysis_fps,
+    nitrogen_mock_enabled,
+    nitrogen_mode_label,
+)
 from backend.fast.action_filter import ActionFilter
 from backend.fast.templates import render_fast
 from backend.fast.event import EventType, GameEvent
@@ -286,7 +291,7 @@ class GameSession:
         cfg = self.cfg
         logger.info(
             "GameSession started (nitrogen=%s, vlm=%s/%s, fast_tts=%s)",
-            "mock" if nitrogen_mock_enabled(cfg) else "live",
+            nitrogen_mode_label(cfg),
             vlm_provider(cfg),
             cfg.vlm_model,
             cfg.fast_tts_enabled,
@@ -306,7 +311,7 @@ class GameSession:
     # ── 核心分析循环 ──────────────────────────────────────────────────
 
     async def _analysis_loop(self):
-        interval = 1.0 / self.cfg.nitrogen_target_fps
+        interval = 1.0 / nitrogen_analysis_fps(self.cfg)
 
         while self._running:
             if not self._analysis_paused:
@@ -326,6 +331,8 @@ class GameSession:
                         "steer":      round(signal.steer, 3),
                         "throttle":   signal.throttle,
                         "brake":      signal.brake,
+                        "hint":       signal.hint_text or None,
+                        "is_change":  signal.is_action_change,
                     })
 
                     event = self.action_filter.process(
@@ -582,19 +589,22 @@ async def probe_page():
 @app.get("/probe/health")
 async def probe_health():
     """探针：服务端组件快照"""
+    cfg = get_config()
+    backend = nitrogen_mode_label(cfg)
     nitro = None
     if _session is not None:
         nitro = {
-            "mode": "mock" if getattr(_session.nitrogen, "is_mock", False) else "live",
+            "mode": getattr(_session.nitrogen, "backend", backend),
             "running": _session.nitrogen._running,
-            "inference_count": _session.nitrogen.inference_count,
-            "timeout_count": _session.nitrogen.timeout_count,
+            "inference_count": getattr(_session.nitrogen, "inference_count", 0),
+            "timeout_count": getattr(_session.nitrogen, "timeout_count", 0),
+            "error_count": getattr(_session.nitrogen, "error_count", 0),
         }
-    cfg = get_config()
     return {
         "ok": True,
         "websocket_ready": _websocket_stack_ready(),
-        "nitrogen_mode": "mock" if nitrogen_mock_enabled(cfg) else "live",
+        "nitrogen_mode": "mock" if backend == "mock" else "live",
+        "nitrogen_backend": backend,
         "vlm_mode": vlm_provider(cfg),
         "vlm_model": cfg.vlm_model,
         "actions_timeline_ready": _action_timeline is not None,
@@ -755,11 +765,12 @@ async def start_session():
     _session = GameSession()
     await _session.start()
     cfg = get_config()
-    mode = "mock" if getattr(_session.nitrogen, "is_mock", False) else "live"
+    backend = nitrogen_mode_label(cfg)
     vlm_mode = vlm_provider(cfg)
     return {
         "status": "ok",
-        "nitrogen_mode": mode,
+        "nitrogen_mode": "mock" if backend == "mock" else "live",
+        "nitrogen_backend": backend,
         "vlm_mode": vlm_mode,
         "vlm_model": cfg.vlm_model,
         "prepare": warmup.get_status(),

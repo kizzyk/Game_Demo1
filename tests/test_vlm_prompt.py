@@ -50,7 +50,7 @@ def test_build_user_text_with_nitrogen():
         user_question="test",
         include_nitrogen=True,
     )
-    assert "steer=" in text
+    assert "快系统动作参考" in text
     assert "timeline here" in text
 
 

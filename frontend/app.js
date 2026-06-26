@@ -510,6 +510,7 @@ function handleServerMessage(msg) {
       $('dbg-steer').textContent   = msg.steer != null ? msg.steer.toFixed(2) : '—';
       $('dbg-throttle').textContent = msg.throttle != null ? String(msg.throttle) : '—';
       $('dbg-brake').textContent   = msg.brake != null ? String(msg.brake) : '—';
+      $('dbg-hint').textContent    = msg.hint || (msg.is_change ? '动作变化' : '—');
       $('dbg-horizon').textContent = (msg.horizon || []).join(' → ');
       $('dbg-time').textContent    = (msg.video_time ?? 0).toFixed(2) + 's';
       dotNitrogen.className = 'dot active';
