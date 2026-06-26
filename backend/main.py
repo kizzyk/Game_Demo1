@@ -124,6 +124,7 @@ class GameSession:
             conversation_history=self.conv_hist,
             vlm_model=cfg.vlm_model,
             vlm_max_tokens=cfg.vlm_max_tokens,
+            get_seek_generation=lambda: self.asr_handler.seek_generation,
         )
 
         self.tts_queue.set_callbacks(
@@ -157,6 +158,7 @@ class GameSession:
             self._main_loop_task.cancel()
         await self.vlm_manager.cancel_all()
         self.tts_queue.clear_and_stop()
+        self.asr_handler.force_unmute()
         self.nitrogen.stop()
         self.asr_handler.stop()
         logger.info("GameSession stopped")
@@ -216,14 +218,21 @@ class GameSession:
 
     def _on_user_utterance(self, text: str):
         """ASR 转写完成回调（在转写线程中调用）"""
+        seek_gen = self.asr_handler.seek_generation
         logger.info("User question: %s", text)
+        self._schedule(self._handle_user_utterance(text, seek_gen))
 
-        self._schedule(self._broadcast({
+    async def _handle_user_utterance(self, text: str, seek_gen: int):
+        if seek_gen != self.asr_handler.seek_generation:
+            logger.debug("User utterance discarded (stale after seek): %s", text)
+            return
+
+        await self._broadcast({
             "type":       "tts",
             "channel":    "user",
             "text":       text,
             "video_time": round(self.frame_buffer.video_position, 2),
-        }))
+        })
 
         from backend.nitrogen.parser import PerceptionSignal
         dummy_signal = self.nitrogen.latest_signal or PerceptionSignal(
@@ -240,7 +249,7 @@ class GameSession:
         )
         frame = self.frame_buffer.latest_frame
         if frame is not None:
-            self._schedule(self.vlm_manager.submit(event, frame))
+            await self.vlm_manager.submit(event, frame, utterance_seek_gen=seek_gen)
 
     # ── 视频控制 ──────────────────────────────────────────────────────
 
@@ -262,7 +271,8 @@ class GameSession:
         self.ctx_buffer.clear()
         self.fast_hist.clear()
         self.action_filter.reset()
-        self.frame_buffer.seek(new_time)   # Fix 11：清空旧帧
+        self.nitrogen.clear_signal()
+        self.frame_buffer.seek(new_time)
 
         self.nitrogen.resume()
         await self._broadcast({"type": "seek_done", "time": new_time})
@@ -270,10 +280,13 @@ class GameSession:
     async def on_pause(self):
         self.frame_buffer.pause()
         self.nitrogen.pause()
+        self.tts_queue.clear_and_stop()
+        self.asr_handler.mute()
 
     async def on_resume(self):
         self.frame_buffer.resume()
         self.nitrogen.resume()
+        self.asr_handler.force_unmute()
 
     # ── 帧与音频输入 ──────────────────────────────────────────────────
 

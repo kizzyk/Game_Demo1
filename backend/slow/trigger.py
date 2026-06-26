@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from backend.fast.event import EventType, GameEvent
 from backend.slow.vlm_client import call_vlm
@@ -41,6 +41,7 @@ class VLMRequestManager:
         conversation_history: "ConversationHistory",
         vlm_model: str = "claude-sonnet-4-6",
         vlm_max_tokens: int = 120,
+        get_seek_generation: Optional[Callable[[], int]] = None,
     ):
         self._tts       = tts_queue
         self._ctx       = context_buffer
@@ -48,6 +49,7 @@ class VLMRequestManager:
         self._conv_hist = conversation_history
         self._model     = vlm_model
         self._max_tokens = vlm_max_tokens
+        self._get_seek_generation = get_seek_generation
 
         self._current_task: Optional[asyncio.Task] = None
         self._pending: Optional[dict] = None
@@ -55,9 +57,21 @@ class VLMRequestManager:
         self._last_event_type:  Optional[EventType] = None
         self._last_submit_time: float = 0.0
 
-    async def submit(self, event: GameEvent, frame: "Image.Image"):
+    async def submit(
+        self,
+        event: GameEvent,
+        frame: "Image.Image",
+        utterance_seek_gen: int | None = None,
+    ):
         """提交 VLM 请求（非阻塞，立即返回）"""
         from backend.tts.queue import Priority
+
+        if not self._is_seek_generation_valid(utterance_seek_gen):
+            logger.debug(
+                "VLM submit discarded (stale after seek): %s",
+                event.type.value,
+            )
+            return
 
         priority  = self._event_to_priority(event)
         is_user_q = (event.type == EventType.USER_QUESTION)
@@ -87,6 +101,7 @@ class VLMRequestManager:
             "ctx_snapshot":  self._ctx.summarize(),
             "fast_recent":   self._fast_hist.get_recent_summary(event.timestamp),
             "conv_messages": self._conv_hist.to_messages() if is_user_q else [],
+            "utterance_seek_gen": utterance_seek_gen,
         }
 
         # ── 提交 ──────────────────────────────────────────────────────
@@ -100,6 +115,13 @@ class VLMRequestManager:
 
     async def _run(self, args: dict):
         try:
+            if not self._is_seek_generation_valid(args.get("utterance_seek_gen")):
+                logger.debug(
+                    "VLM run discarded (stale after seek): %s",
+                    args["event"].type.value,
+                )
+                return
+
             event    = args["event"]
             is_user_q = (event.type == EventType.USER_QUESTION)
 
@@ -113,6 +135,13 @@ class VLMRequestManager:
                 model=self._model,
                 max_tokens=self._max_tokens,
             )
+
+            if not self._is_seek_generation_valid(args.get("utterance_seek_gen")):
+                logger.debug(
+                    "VLM result discarded (stale after seek): %s",
+                    event.type.value,
+                )
+                return
 
             self._last_event_type  = event.type
             self._last_submit_time = time.time()
@@ -146,6 +175,13 @@ class VLMRequestManager:
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
         self._pending = None
+
+    def _is_seek_generation_valid(self, utterance_seek_gen: int | None) -> bool:
+        if utterance_seek_gen is None:
+            return True
+        if self._get_seek_generation is None:
+            return True
+        return utterance_seek_gen == self._get_seek_generation()
 
     @staticmethod
     def _event_to_priority(event: GameEvent) -> "Priority":

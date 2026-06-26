@@ -5,6 +5,7 @@
 import io
 import heapq
 import time
+import threading
 import pytest
 from unittest.mock import MagicMock
 
@@ -249,6 +250,41 @@ class TestTTSQueueStaleSynthesis:
         assert cancelled_fns[0]()
 
 
+class TestTTSQueueConcurrency:
+    def test_concurrent_push_only_one_speaker(self, mock_tts_engine, mock_asr_handler):
+        """并发 push 时 speaker 门闩应保证仅一条 utterance 在播"""
+        started = []
+        start_barrier = threading.Barrier(2)
+
+        def _speak(text, is_cancelled=None, on_dispatched=None, on_error=None):
+            started.append(text)
+            if on_dispatched and not (is_cancelled and is_cancelled()):
+                on_dispatched(0.1)
+
+        mock_tts_engine.speak_async.side_effect = _speak
+
+        q = TTSQueue(mock_tts_engine, mock_asr_handler,
+                     inter_gap=0.0, fallback_margin=0.0)
+
+        def push_text(label):
+            start_barrier.wait(timeout=1.0)
+            q.push(label, Priority.FAST_HINT)
+
+        t1 = threading.Thread(target=push_text, args=("A",))
+        t2 = threading.Thread(target=push_text, args=("B",))
+        t1.start()
+        t2.start()
+        t1.join(timeout=2.0)
+        t2.join(timeout=2.0)
+
+        assert len(started) == 1
+        assert q._is_speaking is True
+
+        finish_playback(q, 1)
+        time.sleep(0.05)
+        assert mock_tts_engine.speak_async.call_count == 2
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # FrameBuffer
 # ═══════════════════════════════════════════════════════════════════════
@@ -292,6 +328,7 @@ class TestFrameBuffer:
         assert fb.latest_frame is not None
         fb.seek(10.0)
         assert fb.latest_frame is None
+        assert fb.video_position == 10.0
 
     def test_initial_state(self):
         fb = FrameBuffer()

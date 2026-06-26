@@ -179,13 +179,21 @@ class TestASRStateCallback:
 
     def test_unmute_restores_listening_after_muted_transcription(self, asr_handler):
         """TTS 期间完成转写，unmute 后应恢复 listening 而非卡在 processing"""
-        asr_handler._transcription_inflight = 1
+        asr_handler._gen_inflight = 1
         asr_handler._set_activity("processing")
         asr_handler.mute()
-        asr_handler._transcription_inflight = 0
+        asr_handler._gen_inflight = 0
         asr_handler.unmute()
         time.sleep(0.5)
         assert asr_handler._last_emitted_state == "listening"
+
+    def test_mute_clears_recording_state(self, asr_handler):
+        """TTS mute 时应清除 recording 状态，避免 unmute 后 UI 卡在正在说话"""
+        asr_handler.process_audio_chunk(LOUD_CHUNK)
+        assert asr_handler._activity_state == "recording"
+        asr_handler.mute()
+        assert asr_handler._activity_state == "listening"
+        assert asr_handler._last_emitted_state == "muted"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -283,9 +291,15 @@ class TestSeekReset:
 
         assert asr_handler._seek_generation == stale_gen + 1
         assert asr_handler._transcription_inflight == 0
+        assert asr_handler._gen_inflight == 0
         assert asr_handler._activity_state == "listening"
 
         asr_handler._transcription_queue.put((np.zeros(100), stale_gen))
         time.sleep(0.3)
 
         assert results == []
+
+    def test_seek_generation_property(self, asr_handler):
+        assert asr_handler.seek_generation == 0
+        asr_handler.reset_for_seek()
+        assert asr_handler.seek_generation == 1

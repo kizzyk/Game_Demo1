@@ -58,7 +58,9 @@ class ASRHandler:
         self._activity_state = "listening"
         self._last_emitted_state = ""
         self._transcription_inflight = 0
+        self._gen_inflight = 0
         self._seek_generation = 0
+        self._state_lock = threading.RLock()
 
         self._speaking       = False
         self._audio_buffer:  list[bytes] = []
@@ -77,28 +79,40 @@ class ASRHandler:
 
         self._emit_state()
 
+    @property
+    def seek_generation(self) -> int:
+        with self._state_lock:
+            return self._seek_generation
+
     # ── TTS 联动接口 ──────────────────────────────────────────────────
 
     def mute(self):
         """TTSQueue 开始播报时调用"""
-        self._cancel_unmute_timer()
-        self._muted = True
-        self._reset_vad()
-        self._emit_state()
+        with self._state_lock:
+            self._cancel_unmute_timer()
+            self._muted = True
+            self._reset_vad()
+            if self._activity_state == "recording":
+                self._activity_state = (
+                    "processing" if self._gen_inflight > 0 else "listening"
+                )
+            self._emit_state()
         logger.debug("ASR muted")
 
     def unmute(self):
         """TTSQueue 播报结束时调用（含 TTS_MUTE_TAIL_SEC 延迟）"""
-        self._cancel_unmute_timer()
-        self._unmute_timer = threading.Timer(self.TTS_MUTE_TAIL_SEC, self._do_unmute)
-        self._unmute_timer.start()
+        with self._state_lock:
+            self._cancel_unmute_timer()
+            self._unmute_timer = threading.Timer(self.TTS_MUTE_TAIL_SEC, self._do_unmute)
+            self._unmute_timer.start()
 
     def force_unmute(self):
         """视频 seek 时调用，跳过 tail delay 直接 unmute"""
-        self._cancel_unmute_timer()
-        self._muted = False
-        self._sync_activity_after_unmute()
-        self._emit_state()
+        with self._state_lock:
+            self._cancel_unmute_timer()
+            self._muted = False
+            self._sync_activity_after_unmute()
+            self._emit_state()
         logger.debug("ASR force unmuted")
 
     def reset_for_seek(self):
@@ -106,37 +120,41 @@ class ASRHandler:
         视频 seek 时调用：丢弃队列中未处理的音频，并使进行中的转写结果失效。
         防止旧时间点的识别结果在 seek 后触发 USER_QUESTION。
         """
-        self._seek_generation += 1
-        drained = 0
-        while True:
-            try:
-                self._transcription_queue.get_nowait()
-                drained += 1
-            except queue.Empty:
-                break
-        if drained:
-            self._transcription_inflight = max(
-                0, self._transcription_inflight - drained
-            )
-        self._reset_vad()
-        self._activity_state = "listening"
+        with self._state_lock:
+            self._seek_generation += 1
+            drained = 0
+            while True:
+                try:
+                    self._transcription_queue.get_nowait()
+                    drained += 1
+                except queue.Empty:
+                    break
+            if drained:
+                self._transcription_inflight = max(
+                    0, self._transcription_inflight - drained
+                )
+            self._gen_inflight = 0
+            self._reset_vad()
+            self._activity_state = "listening"
+            self._emit_state()
         logger.debug(
             "ASR reset for seek (gen=%d, drained=%d)",
-            self._seek_generation, drained,
+            self.seek_generation, drained,
         )
 
     def _do_unmute(self):
-        self._unmute_timer = None
-        self._muted = False
-        self._sync_activity_after_unmute()
-        self._emit_state()
+        with self._state_lock:
+            self._unmute_timer = None
+            self._muted = False
+            self._sync_activity_after_unmute()
+            self._emit_state()
         logger.debug("ASR unmuted")
 
     def _sync_activity_after_unmute(self):
-        """TTS 结束后根据转写队列恢复正确的活动状态"""
-        if self._transcription_inflight > 0:
+        """TTS 结束后根据当前 generation 的在途转写恢复活动状态"""
+        if self._gen_inflight > 0:
             self._activity_state = "processing"
-        elif self._activity_state == "processing":
+        elif self._activity_state in ("processing", "recording"):
             self._activity_state = "listening"
 
     def _cancel_unmute_timer(self):
@@ -151,8 +169,9 @@ class ASRHandler:
         处理前端发来的 PCM 音频块（WebSocket binary frame）。
         约 100ms/块（1600 samples @ 16kHz）。
         """
-        if self._muted:
-            return
+        with self._state_lock:
+            if self._muted:
+                return
 
         audio = np.frombuffer(audio_bytes, dtype=np.int16)
         if len(audio) == 0:
@@ -186,18 +205,21 @@ class ASRHandler:
 
     def _set_activity(self, state: str):
         """更新非 mute 维度的活动状态（listening / recording / processing）"""
-        if self._activity_state != state:
-            self._activity_state = state
-            self._emit_state()
+        with self._state_lock:
+            if self._activity_state != state:
+                self._activity_state = state
+                self._emit_state()
 
     def _emit_state(self):
-        state = "muted" if self._muted else self._activity_state
-        if state == self._last_emitted_state:
-            return
-        self._last_emitted_state = state
-        if self.on_state_change:
+        with self._state_lock:
+            state = "muted" if self._muted else self._activity_state
+            if state == self._last_emitted_state:
+                return
+            self._last_emitted_state = state
+            callback = self.on_state_change
+        if callback:
             try:
-                self.on_state_change(state)
+                callback(state)
             except Exception as e:
                 logger.error("ASR on_state_change error: %s", e)
 
@@ -213,8 +235,12 @@ class ASRHandler:
         logger.debug("ASR queued %.1fs audio for transcription", len(arr) / 16000)
 
         try:
-            self._transcription_queue.put_nowait((arr, self._seek_generation))
-            self._transcription_inflight += 1
+            with self._state_lock:
+                gen = self._seek_generation
+            self._transcription_queue.put_nowait((arr, gen))
+            with self._state_lock:
+                self._transcription_inflight += 1
+                self._gen_inflight += 1
             self._set_activity("processing")
         except queue.Full:
             logger.warning("ASR transcription queue full, dropping audio")
@@ -242,9 +268,18 @@ class ASRHandler:
             except Exception as e:
                 logger.error("Whisper transcribe error: %s", e)
             finally:
-                self._transcription_inflight = max(0, self._transcription_inflight - 1)
-                if not self._muted:
-                    if self._transcription_inflight > 0:
+                with self._state_lock:
+                    self._transcription_inflight = max(
+                        0, self._transcription_inflight - 1
+                    )
+                    if generation == self._seek_generation:
+                        self._gen_inflight = max(0, self._gen_inflight - 1)
+                        gen_inflight = self._gen_inflight
+                    else:
+                        gen_inflight = self._gen_inflight
+                    muted = self._muted
+                if not muted:
+                    if gen_inflight > 0:
                         self._set_activity("processing")
                     else:
                         self._set_activity("listening")

@@ -103,14 +103,15 @@ class TTSQueue:
             text=text,
             expire_sec=MAX_AGE[priority],
         )
+        interrupt = False
         with self._lock:
             heapq.heappush(self._heap, item)
+            if priority == Priority.USER_ANSWER and self._is_speaking:
+                interrupt = True
 
-        if priority == Priority.USER_ANSWER and self._is_speaking:
+        if interrupt:
             self._interrupt()
-            threading.Timer(0.05, self._speak_next).start()
-        elif not self._is_speaking:
-            self._speak_next()
+        self._speak_next()
 
     def on_client_tts_done(self, utterance_id: int):
         """前端 Audio.onended 回传，精确完成信号"""
@@ -145,6 +146,8 @@ class TTSQueue:
         now = time.time()
 
         with self._lock:
+            if self._is_speaking:
+                return
             item = None
             while self._heap:
                 candidate = heapq.heappop(self._heap)
@@ -157,13 +160,13 @@ class TTSQueue:
                                  candidate.text[:20], age)
             if item is None:
                 return
+            self._is_speaking = True
 
         self._utterance_id += 1
         uid = self._utterance_id
         self._pending_done_id = uid
         self._completion_handled = False
         self._current_item = item
-        self._is_speaking  = True
 
         self._speak_token += 1
         token = self._speak_token
@@ -217,9 +220,10 @@ class TTSQueue:
             self._completion_handled = True
 
         self._cancel_fallback_timer()
-        self._is_speaking  = False
-        self._current_item = None
-        self._pending_done_id = None
+        with self._lock:
+            self._is_speaking  = False
+            self._current_item = None
+            self._pending_done_id = None
 
         logger.debug("TTS playback done #%d via %s", utterance_id, source)
 
@@ -245,8 +249,9 @@ class TTSQueue:
             self._pending_done_id = None
 
         self._tts.stop()
-        self._is_speaking  = False
-        self._current_item = None
+        with self._lock:
+            self._is_speaking  = False
+            self._current_item = None
 
     def _cancel_fallback_timer(self):
         if self._fallback_timer is not None:

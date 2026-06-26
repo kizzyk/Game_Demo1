@@ -44,6 +44,7 @@ class FrameBuffer:
     def resume(self):
         self._paused = False
 
-    def seek(self, _time: float):
-        """seek 时清空当前帧，防止旧帧被 NitroGen 重复推理"""
+    def seek(self, time: float):
+        """seek 时清空当前帧并同步视频时间，防止旧帧被 NitroGen 重复推理"""
         self.latest_frame = None
+        self.video_position = time

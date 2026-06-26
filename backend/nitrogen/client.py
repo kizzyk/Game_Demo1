@@ -87,6 +87,11 @@ class NitroGenClient:
         with self._signal_lock:
             return self._latest_signal
 
+    def clear_signal(self):
+        """seek 时清空旧感知信号，防止新位置误用旧意图"""
+        with self._signal_lock:
+            self._latest_signal = None
+
     # ── 内部推理循环 ──────────────────────────────────────────────────
 
     def _connect(self):
