@@ -261,6 +261,7 @@ class GameSession:
         self._main_loop_task = asyncio.create_task(self._analysis_loop())
 
         await self._broadcast({"type": "status", "state": "started"})
+        cfg = self.cfg
         logger.info(
             "GameSession started (nitrogen=%s, vlm=%s/%s, fast_tts=%s)",
             "mock" if nitrogen_mock_enabled(cfg) else "live",
