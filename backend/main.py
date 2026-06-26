@@ -477,6 +477,47 @@ async def index():
     return HTMLResponse("<h1>NitroGen Game Coach</h1>")
 
 
+@app.get("/probe")
+async def probe_page():
+    """浏览器 E2E 链路探针页面"""
+    html_path = FRONTEND_DIR / "probe.html"
+    if html_path.exists():
+        return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>probe.html not found</h1>", status_code=404)
+
+
+@app.get("/probe/health")
+async def probe_health():
+    """探针：服务端组件快照"""
+    nitro = None
+    if _session is not None:
+        nitro = {
+            "running": _session.nitrogen._running,
+            "inference_count": _session.nitrogen.inference_count,
+            "timeout_count": _session.nitrogen.timeout_count,
+        }
+    return {
+        "ok": True,
+        "session_running": _session is not None and _session._running,
+        "ws_clients": len(_ws_clients),
+        "has_primary": _primary_ws is not None,
+        "nitrogen": nitro,
+    }
+
+
+@app.post("/probe/tts-echo")
+async def probe_tts_echo():
+    """探针：向 TTS 队列注入短句，验证合成 → WS 二进制 → tts_done 链路"""
+    if _session is None or not _session._running:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "分析会话未运行，请先通过探针或 /start 启动"},
+        )
+    text = "探针测试，链路正常。"
+    _session.tts_queue.push(text, Priority.FAST_HINT)
+    return {"status": "queued", "text": text}
+
+
 @app.get("/session/status")
 async def session_status():
     """查询当前分析会话是否在运行（旁观模式连接前检查）"""
