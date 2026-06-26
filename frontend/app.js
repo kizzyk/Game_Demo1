@@ -159,9 +159,6 @@ function handleServerMessage(msg) {
         pendingUtteranceId = msg.utterance_id;
         ttsStatus.textContent = `▶ ${channelLabel(msg.channel)}: "${truncate(msg.text, 20)}"`;
       }
-      if (msg.channel === 'user') {
-        micStatus.textContent = '🎤 识别中…';
-      }
       break;
 
     case 'tts_interrupt':

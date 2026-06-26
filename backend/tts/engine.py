@@ -26,9 +26,11 @@ class TTSEngine:
     is_cancelled 用于打断后丢弃过期的合成结果，避免脏 MP3。
     """
 
-    def __init__(self, voice: str = "zh-CN-YunxiNeural", rate: str = "+20%"):
+    def __init__(self, voice: str = "zh-CN-YunxiNeural", rate: str = "+20%",
+                 synthesis_timeout: float = 15.0):
         self.voice = voice
         self.rate  = rate
+        self._synthesis_timeout = synthesis_timeout
         self._cache: dict[str, bytes] = {}
         self.on_audio_data: Optional[Callable[[bytes], None]] = None
 
@@ -85,7 +87,18 @@ class TTSEngine:
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            audio_data = loop.run_until_complete(self._synthesize_cached(text))
+            audio_data = loop.run_until_complete(
+                asyncio.wait_for(
+                    self._synthesize_cached(text),
+                    timeout=self._synthesis_timeout,
+                )
+            )
+        except asyncio.TimeoutError:
+            logger.error("TTS synthesis timeout (%.0fs): '%s'",
+                         self._synthesis_timeout, text[:20])
+            if on_error and not _cancelled():
+                on_error()
+            return
         except Exception as e:
             logger.error("TTS synthesis error: %s", e)
             if on_error and not _cancelled():

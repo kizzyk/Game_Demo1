@@ -57,6 +57,7 @@ class ASRHandler:
         self._muted = False
         self._activity_state = "listening"
         self._last_emitted_state = ""
+        self._transcription_inflight = 0
 
         self._speaking       = False
         self._audio_buffer:  list[bytes] = []
@@ -95,14 +96,23 @@ class ASRHandler:
         """视频 seek 时调用，跳过 tail delay 直接 unmute"""
         self._cancel_unmute_timer()
         self._muted = False
+        self._sync_activity_after_unmute()
         self._emit_state()
         logger.debug("ASR force unmuted")
 
     def _do_unmute(self):
         self._unmute_timer = None
         self._muted = False
+        self._sync_activity_after_unmute()
         self._emit_state()
         logger.debug("ASR unmuted")
+
+    def _sync_activity_after_unmute(self):
+        """TTS 结束后根据转写队列恢复正确的活动状态"""
+        if self._transcription_inflight > 0:
+            self._activity_state = "processing"
+        elif self._activity_state == "processing":
+            self._activity_state = "listening"
 
     def _cancel_unmute_timer(self):
         if self._unmute_timer is not None:
@@ -143,8 +153,9 @@ class ASRHandler:
             if self._silence_frames >= silence_limit:
                 if self._speech_frames >= speech_min:
                     self._flush()
+                else:
+                    self._set_activity("listening")
                 self._reset_vad()
-                self._set_activity("listening")
 
     # ── 内部实现 ──────────────────────────────────────────────────────
 
@@ -178,6 +189,7 @@ class ASRHandler:
 
         try:
             self._transcription_queue.put_nowait(arr)
+            self._transcription_inflight += 1
             self._set_activity("processing")
         except queue.Full:
             logger.warning("ASR transcription queue full, dropping audio")
@@ -201,8 +213,12 @@ class ASRHandler:
             except Exception as e:
                 logger.error("Whisper transcribe error: %s", e)
             finally:
+                self._transcription_inflight = max(0, self._transcription_inflight - 1)
                 if not self._muted:
-                    self._set_activity("listening")
+                    if self._transcription_inflight > 0:
+                        self._set_activity("processing")
+                    else:
+                        self._set_activity("listening")
 
     def _reset_vad(self):
         self._speaking       = False

@@ -1127,8 +1127,12 @@ byte[0] = 0x02  视频帧（canvas 截图，用于 NitroGen，Fix 11）
 #### 二进制消息（服务端 → 客户端）
 
 ```
-TTS 音频 MP3 bytes（Fix 14，无类型前缀，服务端→客户端仅此一种 binary）
-前端收到 ArrayBuffer 时直接当 MP3 播放
+byte[0]    = 0x03  TTS 音频帧（utterance 握手）
+byte[1:5]  = uint32 little-endian（utterance_id，与 JSON tts 消息对应）
+byte[5:]   = MP3 bytes
+
+前端解析 0x03 帧后播放 MP3，Audio.onended 时发送 tts_done。
+即使 JSON 字幕晚于 MP3 到达，也可从帧头取得 utterance_id。
 ```
 
 #### JSON 消息（客户端 → 服务端）
@@ -1146,24 +1150,31 @@ TTS 音频 MP3 bytes（Fix 14，无类型前缀，服务端→客户端仅此一
 // 视频自然结束
 { "type": "video_ended" }
 
-// TTS 播放完毕（精确时序信号，Fix 14）
-{ "type": "tts_done" }
+// TTS 播放完毕（精确时序信号，主路径）
+{ "type": "tts_done", "utterance_id": 42 }
 ```
 
 #### JSON 消息（服务端 → 客户端）
 
 ```json
-// 语音播报开始（同步显示字幕）
+// 语音播报开始（同步显示字幕，在 MP3 帧之前发送）
 {
   "type": "tts",
+  "utterance_id": 42,
   "channel": "fast" | "slow" | "user_answer" | "user",
   "text": "向左闪！",
   "video_time": 5.3,
   "playing": true
 }
 
-// 语音播报结束
+// TTS 被打断（USER_ANSWER 等），前端应立即 stop 当前 Audio
+{ "type": "tts_interrupt", "utterance_id": 41 }
+
+// 语音播报结束（队列空闲）
 { "type": "tts_end" }
+
+// ASR 麦克风状态（驱动前端状态栏）
+{ "type": "asr_state", "state": "listening" | "recording" | "processing" | "muted" }
 
 // 系统状态
 { "type": "status", "state": "started" | "video_ready", "duration": 120.5 }
@@ -1241,6 +1252,8 @@ class Config:
 
     # TTS
     tts_inter_utterance_gap: float = 0.8   # 两条语音之间的间隔
+    tts_done_fallback_margin: float = 1.0  # 前端未回 tts_done 时的额外宽限
+    tts_synthesis_timeout_sec: float = 15.0  # edge-tts 合成超时
     fast_hint_expire_sec:    float = 2.0   # 快提示超时丢弃
 
     # ASR

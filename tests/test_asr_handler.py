@@ -168,6 +168,25 @@ class TestASRStateCallback:
         asr_handler.process_audio_chunk(LOUD_CHUNK)
         assert "recording" in states
 
+    def test_flush_keeps_processing_until_transcription_done(self, asr_handler):
+        """语音结束后应保持 processing，不应立即变 listening"""
+        for _ in range(8):
+            asr_handler.process_audio_chunk(LOUD_CHUNK)
+        for _ in range(15):
+            asr_handler.process_audio_chunk(SILENT_CHUNK)
+        assert asr_handler._activity_state == "processing"
+        assert asr_handler._transcription_inflight == 1
+
+    def test_unmute_restores_listening_after_muted_transcription(self, asr_handler):
+        """TTS 期间完成转写，unmute 后应恢复 listening 而非卡在 processing"""
+        asr_handler._transcription_inflight = 1
+        asr_handler._set_activity("processing")
+        asr_handler.mute()
+        asr_handler._transcription_inflight = 0
+        asr_handler.unmute()
+        time.sleep(0.5)
+        assert asr_handler._last_emitted_state == "listening"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 非阻塞转写架构（Fix 13）

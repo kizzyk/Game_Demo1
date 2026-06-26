@@ -37,6 +37,7 @@ class Config:
     tts_rate: str = "+20%"                  # 语速（+20% 偏快，游戏场景）
     tts_inter_utterance_gap: float = 0.8    # 两条语音之间的间隔（秒）
     tts_done_fallback_margin: float = 1.0     # 前端未回 tts_done 时的额外宽限（秒）
+    tts_synthesis_timeout_sec: float = 15.0   # edge-tts 合成超时（秒），防止 ASR 长期 muted
     fast_hint_expire_sec: float = 2.0       # 快提示超时丢弃（秒）
 
     # ── ASR（5号负责调优）─────────────────────────────────────────────

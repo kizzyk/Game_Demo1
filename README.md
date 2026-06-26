@@ -261,9 +261,9 @@ TTS_MUTE_TAIL_SEC = 0.2   # TTS 结束后额外静默，消除回声尾音
 
 `backend/main.py` 中 `_session` 是全局变量，只支持单个会话。多人同时访问会互相覆盖。Demo 场景够用，正式部署需要会话隔离。
 
-**10. TTS 播放完成时序精度**
+**10. TTS 播放完成时序**
 
-`TTSEngine` 通过 pydub 估算 MP3 时长（+300ms 缓冲）来触发 `on_complete`，估算值与前端实际播放完成时刻之间仍有偏差（网络抖动、浏览器解码延迟等）。前端发送的 `tts_done` 消息目前未被后端响应（仅作记录），若需精确联动可将其接入 `_on_complete` 流程。
+播放完成以**前端 `tts_done`（带 `utterance_id`）为主路径**，后端 fallback 定时器（估算时长 + `tts_done_fallback_margin`）兜底。MP3 通过 `0x03 + utterance_id` 二进制帧与字幕关联，消除 JSON/MP3 乱序问题。
 
 ---
 

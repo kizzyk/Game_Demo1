@@ -96,7 +96,11 @@ class GameSession:
         self.conv_hist  = ConversationHistory()
         self.fast_hist  = FastHistory()
 
-        self.tts_engine  = TTSEngine(voice=cfg.tts_voice, rate=cfg.tts_rate)
+        self.tts_engine  = TTSEngine(
+            voice=cfg.tts_voice,
+            rate=cfg.tts_rate,
+            synthesis_timeout=cfg.tts_synthesis_timeout_sec,
+        )
         self.asr_handler = ASRHandler(
             model_size=cfg.whisper_model,
             language=cfg.whisper_language,
@@ -131,11 +135,13 @@ class GameSession:
 
         self._main_loop_task: Optional[asyncio.Task] = None
         self._running = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ── 生命周期 ──────────────────────────────────────────────────────
 
     async def start(self):
         """启动推理与分析循环（不再需要打开视频文件）"""
+        self._loop = asyncio.get_running_loop()
         self.nitrogen.start(self.frame_buffer)   # Fix 11：传 FrameBuffer
         self.tts_engine.preload()
 
@@ -200,20 +206,24 @@ class GameSession:
 
     # ── 用户语音 ──────────────────────────────────────────────────────
 
+    def _schedule(self, coro):
+        """从非 asyncio 线程安全调度协程到 GameSession 事件循环"""
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            logger.warning("GameSession loop unavailable, dropping broadcast")
+            return
+        asyncio.run_coroutine_threadsafe(coro, loop)
+
     def _on_user_utterance(self, text: str):
         """ASR 转写完成回调（在转写线程中调用）"""
         logger.info("User question: %s", text)
 
-        loop = asyncio.get_event_loop()
-        asyncio.run_coroutine_threadsafe(
-            self._broadcast({
-                "type":       "tts",
-                "channel":    "user",
-                "text":       text,
-                "video_time": round(self.frame_buffer.video_position, 2),
-            }),
-            loop,
-        )
+        self._schedule(self._broadcast({
+            "type":       "tts",
+            "channel":    "user",
+            "text":       text,
+            "video_time": round(self.frame_buffer.video_position, 2),
+        }))
 
         from backend.nitrogen.parser import PerceptionSignal
         dummy_signal = self.nitrogen.latest_signal or PerceptionSignal(
@@ -230,10 +240,7 @@ class GameSession:
         )
         frame = self.frame_buffer.latest_frame
         if frame is not None:
-            asyncio.run_coroutine_threadsafe(
-                self.vlm_manager.submit(event, frame),
-                loop,
-            )
+            self._schedule(self.vlm_manager.submit(event, frame))
 
     # ── 视频控制 ──────────────────────────────────────────────────────
 
@@ -280,47 +287,32 @@ class GameSession:
     # ── TTS 回调 ──────────────────────────────────────────────────────
 
     def _on_asr_state_change(self, state: str):
-        asyncio.run_coroutine_threadsafe(
-            self._broadcast({"type": "asr_state", "state": state}),
-            asyncio.get_event_loop(),
-        )
+        self._schedule(self._broadcast({"type": "asr_state", "state": state}))
 
     def _on_tts_start(self, text: str, channel: str, utterance_id: int):
         """TTS 开始播报 → 广播 JSON 事件（供前端更新 UI，在 MP3 之前）"""
-        asyncio.run_coroutine_threadsafe(
-            self._broadcast({
-                "type":          "tts",
-                "utterance_id":  utterance_id,
-                "channel":       channel,
-                "text":          text,
-                "video_time":    round(self.frame_buffer.video_position, 2),
-                "playing":       True,
-            }),
-            asyncio.get_event_loop(),
-        )
+        self._schedule(self._broadcast({
+            "type":          "tts",
+            "utterance_id":  utterance_id,
+            "channel":       channel,
+            "text":          text,
+            "video_time":    round(self.frame_buffer.video_position, 2),
+            "playing":       True,
+        }))
 
     def _on_tts_interrupt(self, utterance_id: int):
-        asyncio.run_coroutine_threadsafe(
-            self._broadcast({
-                "type":         "tts_interrupt",
-                "utterance_id": utterance_id,
-            }),
-            asyncio.get_event_loop(),
-        )
+        self._schedule(self._broadcast({
+            "type":         "tts_interrupt",
+            "utterance_id": utterance_id,
+        }))
 
     def _on_tts_end(self):
-        asyncio.run_coroutine_threadsafe(
-            self._broadcast({"type": "tts_end"}),
-            asyncio.get_event_loop(),
-        )
+        self._schedule(self._broadcast({"type": "tts_end"}))
 
     def _broadcast_tts_audio(self, utterance_id: int, audio_bytes: bytes):
         """将 MP3 打包 utterance_id 后广播给所有 WebSocket 客户端"""
         framed = frame_tts_audio(utterance_id, audio_bytes)
-        asyncio.run_coroutine_threadsafe(
-            self._broadcast_binary(framed),
-            asyncio.get_event_loop(),
-        )
+        self._schedule(self._broadcast_binary(framed))
 
     # ── 广播工具 ──────────────────────────────────────────────────────
 
@@ -399,7 +391,7 @@ async def websocket_endpoint(ws: WebSocket):
 
     JSON（双向）：
       客户端发：seek / playback / video_ready / tts_done
-      服务端发：tts / tts_end / perception / status / seek_done / video_ended
+      服务端发：tts / tts_end / tts_interrupt / asr_state / perception / status / seek_done / video_ended
     """
     await ws.accept()
     _ws_clients.append(ws)
