@@ -58,6 +58,7 @@ class ASRHandler:
         self._activity_state = "listening"
         self._last_emitted_state = ""
         self._transcription_inflight = 0
+        self._seek_generation = 0
 
         self._speaking       = False
         self._audio_buffer:  list[bytes] = []
@@ -99,6 +100,30 @@ class ASRHandler:
         self._sync_activity_after_unmute()
         self._emit_state()
         logger.debug("ASR force unmuted")
+
+    def reset_for_seek(self):
+        """
+        视频 seek 时调用：丢弃队列中未处理的音频，并使进行中的转写结果失效。
+        防止旧时间点的识别结果在 seek 后触发 USER_QUESTION。
+        """
+        self._seek_generation += 1
+        drained = 0
+        while True:
+            try:
+                self._transcription_queue.get_nowait()
+                drained += 1
+            except queue.Empty:
+                break
+        if drained:
+            self._transcription_inflight = max(
+                0, self._transcription_inflight - drained
+            )
+        self._reset_vad()
+        self._activity_state = "listening"
+        logger.debug(
+            "ASR reset for seek (gen=%d, drained=%d)",
+            self._seek_generation, drained,
+        )
 
     def _do_unmute(self):
         self._unmute_timer = None
@@ -188,7 +213,7 @@ class ASRHandler:
         logger.debug("ASR queued %.1fs audio for transcription", len(arr) / 16000)
 
         try:
-            self._transcription_queue.put_nowait(arr)
+            self._transcription_queue.put_nowait((arr, self._seek_generation))
             self._transcription_inflight += 1
             self._set_activity("processing")
         except queue.Full:
@@ -197,15 +222,19 @@ class ASRHandler:
 
     def _transcription_loop(self):
         while True:
-            arr = self._transcription_queue.get()
-            if arr is None:
+            item = self._transcription_queue.get()
+            if item is None:
                 break
+            arr, generation = item
             try:
                 result = self.model.transcribe(
                     arr,
                     language=self.language,
                     fp16=False,
                 )
+                if generation != self._seek_generation:
+                    logger.debug("ASR result discarded (stale after seek)")
+                    continue
                 text = result["text"].strip()
                 logger.info("ASR result: %s", text)
                 if text and self.on_utterance:

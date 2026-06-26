@@ -255,6 +255,7 @@ class GameSession:
         """前端拖动进度条"""
         self.nitrogen.pause()
         self.tts_queue.clear_and_stop()
+        self.asr_handler.reset_for_seek()
         self.asr_handler.force_unmute()
         await self.vlm_manager.cancel_all()
 

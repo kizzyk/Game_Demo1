@@ -213,7 +213,7 @@ class TestNonBlockingTranscription:
 
         # 直接向转写队列推任务
         arr = np.zeros(16000, dtype=np.float32)
-        asr_handler._transcription_queue.put(arr)
+        asr_handler._transcription_queue.put((arr, asr_handler._seek_generation))
 
         # 等转写线程处理（最多 3s）
         deadline = time.time() + 3.0
@@ -256,7 +256,9 @@ class TestNonBlockingTranscription:
         # 填满队列
         import numpy as np
         for _ in range(5):
-            asr_handler._transcription_queue.put(np.zeros(100))
+            asr_handler._transcription_queue.put(
+                (np.zeros(100), asr_handler._seek_generation)
+            )
 
         # 准备缓冲区
         for _ in range(8):
@@ -268,3 +270,22 @@ class TestNonBlockingTranscription:
         asr_handler._flush()
         elapsed = time.time() - start
         assert elapsed < 0.1
+
+
+class TestSeekReset:
+    def test_reset_for_seek_discards_stale_transcription(self, asr_handler):
+        """Seek 后旧 generation 的转写结果应被丢弃，不触发 on_utterance。"""
+        results = []
+        asr_handler.on_utterance = lambda text: results.append(text)
+        stale_gen = asr_handler._seek_generation
+
+        asr_handler.reset_for_seek()
+
+        assert asr_handler._seek_generation == stale_gen + 1
+        assert asr_handler._transcription_inflight == 0
+        assert asr_handler._activity_state == "listening"
+
+        asr_handler._transcription_queue.put((np.zeros(100), stale_gen))
+        time.sleep(0.3)
+
+        assert results == []
