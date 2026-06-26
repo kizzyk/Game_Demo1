@@ -114,7 +114,7 @@ class ASRHandler:
 
         self.on_utterance: Optional[Callable[[str, int], None]] = None
         self.on_state_change: Optional[Callable[[str], None]] = None
-        self.on_barge_in: Optional[Callable[[], None]] = None
+        self.on_barge_in: Optional[Callable[[], bool]] = None
         self.is_tts_playing: Optional[Callable[[], bool]] = None
 
         self._muted = False
@@ -181,10 +181,13 @@ class ASRHandler:
             self._unmute_timer.start()
 
     def force_unmute(self):
-        """视频 seek 时调用，跳过 tail delay 直接 unmute"""
+        """视频 seek 或 barge-in 后调用，跳过 tail delay 直接 unmute"""
         with self._state_lock:
             self._cancel_unmute_timer()
             self._muted = False
+            self._barge_in_armed = True
+            self._barge_in_frames = 0
+            self._reset_vad_unlocked()
             self._sync_activity_after_unmute()
             self._emit_state_unlocked()
         logger.debug("ASR force unmuted")
@@ -245,8 +248,20 @@ class ASRHandler:
         """
         with self._state_lock:
             if self._muted:
-                self._check_barge_in_unlocked(audio_bytes, sample_rate)
-                return
+                playing = bool(
+                    self.is_tts_playing and self.is_tts_playing()
+                )
+                if playing:
+                    self._check_barge_in_unlocked(audio_bytes, sample_rate)
+                    if self._muted:
+                        return
+                else:
+                    # TTS 已结束但仍 mute（尾音延迟 / 误触发 barge-in）→ 立即恢复
+                    self._cancel_unmute_timer()
+                    self._muted = False
+                    self._barge_in_armed = True
+                    self._barge_in_frames = 0
+                    self._emit_state_unlocked()
 
             audio = np.frombuffer(audio_bytes, dtype=np.int16)
             if len(audio) == 0:
@@ -304,14 +319,18 @@ class ASRHandler:
         if amplitude > self._barge_in_threshold:
             self._barge_in_frames += 1
             if self._barge_in_frames >= speech_min:
-                self._barge_in_armed = False
                 self._barge_in_frames = 0
                 callback = self.on_barge_in
+                handled = False
                 if callback:
                     try:
-                        callback()
+                        handled = bool(callback())
                     except Exception as e:
                         logger.error("ASR on_barge_in error: %s", e)
+                if handled:
+                    self._barge_in_armed = False
+                else:
+                    self._barge_in_armed = True
         else:
             self._barge_in_frames = max(0, self._barge_in_frames - 1)
 

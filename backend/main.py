@@ -564,12 +564,14 @@ class GameSession:
     def _on_asr_state_change(self, state: str):
         self._schedule(self._broadcast({"type": "asr_state", "state": state}))
 
-    def _on_asr_barge_in(self):
-        """用户说话打断 TTS，恢复收音（仅在实际播报时生效）。"""
+    def _on_asr_barge_in(self) -> bool:
+        """用户说话打断 TTS，恢复收音（仅在实际播报时生效）。返回是否已处理。"""
         if not self.tts_queue.is_speaking:
-            return
+            logger.debug("Barge-in ignored (TTS not playing)")
+            return False
         logger.info("Barge-in: user speech interrupted TTS")
         self.tts_queue.barge_in_interrupt()
+        return True
 
     def _on_tts_subtitle(self, text: str, channel: str, utterance_id: int):
         """字幕先出（合成中），此时不 mute 麦克风。"""

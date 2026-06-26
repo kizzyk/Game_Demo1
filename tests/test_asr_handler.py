@@ -119,6 +119,7 @@ class TestVAD:
 class TestMuteUnmute:
     def test_mute_blocks_processing(self, asr_handler):
         """mute 后的音频块不更新 VAD 状态"""
+        asr_handler.is_tts_playing = lambda: True
         asr_handler.mute()
         asr_handler.process_audio_chunk(LOUD_CHUNK)
         assert asr_handler._speaking is False
@@ -337,7 +338,11 @@ class TestSeekReset:
 class TestBargeIn:
     def test_barge_in_during_mute_triggers_callback(self, asr_handler):
         fired = threading.Event()
-        asr_handler.on_barge_in = fired.set
+        def on_barge():
+            fired.set()
+            asr_handler.force_unmute()
+            return True
+        asr_handler.on_barge_in = on_barge
         asr_handler.is_tts_playing = lambda: True
         asr_handler.mute()
 
@@ -345,11 +350,12 @@ class TestBargeIn:
             asr_handler.process_audio_chunk(LOUD_CHUNK)
 
         assert fired.wait(timeout=1.0), "barge-in should fire during TTS mute"
+        assert asr_handler._muted is False
 
     def test_barge_in_not_fired_when_disabled(self, asr_handler):
         asr_handler._barge_in_enabled = False
         fired = threading.Event()
-        asr_handler.on_barge_in = fired.set
+        asr_handler.on_barge_in = lambda: fired.set() or True
         asr_handler.mute()
 
         for _ in range(8):
@@ -357,3 +363,15 @@ class TestBargeIn:
 
         time.sleep(0.2)
         assert not fired.is_set()
+
+    def test_stale_mute_recover_when_tts_not_playing(self, asr_handler):
+        """TTS 已结束但仍 mute + barge_in 已 disarm 时，应自动恢复收音。"""
+        asr_handler.mute()
+        asr_handler._barge_in_armed = False
+        asr_handler.is_tts_playing = lambda: False
+
+        asr_handler.process_audio_chunk(LOUD_CHUNK)
+
+        assert asr_handler._muted is False
+        assert asr_handler._barge_in_armed is True
+        assert asr_handler._speaking is True

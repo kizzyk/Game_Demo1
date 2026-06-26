@@ -161,6 +161,7 @@ class TTSQueue:
         self._interrupt(notify=True, unmute_if_idle=True)
         if self._asr:
             self._asr.force_unmute()
+        threading.Timer(0.05, self._speak_next).start()
 
     # ── 内部调度 ──────────────────────────────────────────────────────
 
