@@ -10,14 +10,18 @@
   <div id="app">
 
     <header id="header">
-      <span class="title">NitroGen 游戏语音教练</span>
+      <div class="header-left">
+        <span class="title">NitroGen 游戏语音教练</span>
+        <nav class="header-nav" aria-label="快捷入口">
+          <a href="/probe" class="header-nav-link" title="E2E 链路探针">探针</a>
+          <a href="?mode=observer" id="link-observer" class="header-nav-link" title="只读旁观">旁观</a>
+        </nav>
+      </div>
       <div id="status-bar">
         <span class="dot" id="dot-nitrogen" title="NitroGen 推理状态">NitroGen</span>
         <span class="dot" id="dot-vlm"      title="VLM 处理状态">VLM</span>
         <span id="tts-status">🔇 待机</span>
         <span id="mic-status">🎤 未连接</span>
-        <a href="?mode=observer" id="link-observer" class="observer-link" title="只读旁观">旁观</a>
-        <a href="/probe" class="observer-link" title="E2E 链路探针">探针</a>
       </div>
     </header>
 
