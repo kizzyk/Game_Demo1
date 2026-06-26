@@ -45,6 +45,5 @@ class FrameBuffer:
         self._paused = False
 
     def seek(self, time: float):
-        """seek 时清空当前帧并同步视频时间，防止旧帧被 NitroGen 重复推理"""
-        self.latest_frame = None
+        """同步视频时间；保留 latest_frame 以便暂停/seek 后仍可语音问答"""
         self.video_position = time

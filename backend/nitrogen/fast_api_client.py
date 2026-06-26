@@ -171,12 +171,27 @@ class FastApiNitroGenClient:
                 if gen_at_start == self._signal_generation:
                     self._latest_signal = signal
             self.inference_count += 1
+            if self.inference_count == 1:
+                logger.info(
+                    "FastAPI NitroGen first inference OK → %s intent=%s",
+                    self.base_url, signal.primary_intent,
+                )
         except httpx.TimeoutException:
             self.timeout_count += 1
-            logger.warning("FastAPI NitroGen timeout (#%d)", self.timeout_count)
+            logger.warning(
+                "FastAPI NitroGen timeout (#%d) url=%s",
+                self.timeout_count, self.base_url,
+            )
+        except httpx.ConnectError as e:
+            self.error_count += 1
+            logger.error(
+                "FastAPI NitroGen connect failed url=%s — "
+                "请确认 SSH 隧道与 NITROGEN_FAST_API_URL（勿用陪玩 8000 端口）: %s",
+                self.base_url, e,
+            )
         except Exception as e:
             self.error_count += 1
-            logger.error("FastAPI NitroGen predict error: %s", e)
+            logger.error("FastAPI NitroGen predict error (%s): %s", self.base_url, e)
 
     def _inference_loop(self, frame_pipe: "VideoFramePipe"):
         interval = 1.0 / self.target_fps

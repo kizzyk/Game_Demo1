@@ -420,11 +420,15 @@ function sendVideoReadyIfNeeded() {
 }
 
 /** 主连接接管或重连后，将当前视频进度同步给后端 */
-function syncPrimaryStateToServer() {
+function syncPrimaryStateToServer({ syncSeek = false } = {}) {
   if (!isPrimaryClient || !ws || ws.readyState !== WebSocket.OPEN) return;
   sendVideoReadyIfNeeded();
-  isSeeking = true;
-  ws.send(JSON.stringify({ type: 'seek', time: videoPlayer.currentTime }));
+  // 暂停时也推一帧，供 VLM / NitroGen 使用
+  captureSnapshotFrame();
+  if (syncSeek) {
+    isSeeking = true;
+    ws.send(JSON.stringify({ type: 'seek', time: videoPlayer.currentTime }));
+  }
   // 分析进行中一律 resume，避免误 pause 导致画面帧/ASR 链路卡住
   if (isAnalysisRunning) {
     ws.send(JSON.stringify({ type: 'playback', action: 'resume' }));
@@ -453,7 +457,7 @@ async function applySessionRole(role) {
   isPrimaryClient = (role === 'primary');
   if (isPrimaryClient) {
     await ensureMicrophoneReady();
-    syncPrimaryStateToServer();
+    syncPrimaryStateToServer({ syncSeek: wasPrimary });
     startFrameCapture();
     requestAsrState();
     if (!wasPrimary) {
@@ -555,7 +559,7 @@ function handleServerMessage(msg) {
     case 'primary_changed':
       addSystemMsg('主连接已切换');
       if (isPrimaryClient) {
-        syncPrimaryStateToServer();
+        syncPrimaryStateToServer({ syncSeek: true });
       }
       break;
 
@@ -622,8 +626,12 @@ function handleServerMessage(msg) {
         addSystemMsg(msg.message);
       }
       if (msg.state === 'user_question_no_frame') {
-        addSystemMsg('画面未就绪，暂时无法回答，请稍后再问');
+        addSystemMsg(msg.message || '画面未就绪，暂时无法回答，请点击播放视频后再问');
       }
+      break;
+
+    case 'request_frame':
+      captureSnapshotFrame();
       break;
 
     case 'video_ended':
@@ -654,29 +662,41 @@ function stopFrameCapture() {
   }
 }
 
+function sendJpegFrame(jpegBuf, videoTime) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const header = new ArrayBuffer(9);
+  const view = new DataView(header);
+  view.setUint8(0, 0x02);
+  view.setFloat64(1, videoTime, true);
+  const msg = new Uint8Array(9 + jpegBuf.byteLength);
+  msg.set(new Uint8Array(header), 0);
+  msg.set(new Uint8Array(jpegBuf), 9);
+  ws.send(msg.buffer);
+}
+
+/** 推送当前画面一帧（视频暂停时也可用，供 VLM / NitroGen） */
+function captureSnapshotFrame() {
+  if (!isPrimaryClient || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (videoPlayer.readyState < 2) return;
+  captureCtx.drawImage(videoPlayer, 0, 0, 256, 256);
+  captureCanvas.toBlob(blob => {
+    if (!blob || !ws || ws.readyState !== WebSocket.OPEN) return;
+    blob.arrayBuffer().then(jpegBuf => {
+      sendJpegFrame(jpegBuf, videoPlayer.currentTime);
+    });
+  }, 'image/jpeg', 0.85);
+}
+
 function captureAndSendFrame() {
   if (!isPrimaryClient || !ws || ws.readyState !== WebSocket.OPEN) return;
   if (videoPlayer.paused || videoPlayer.ended || videoPlayer.readyState < 2) return;
 
-  // 将当前视频帧绘制到 256×256 canvas
   captureCtx.drawImage(videoPlayer, 0, 0, 256, 256);
 
   captureCanvas.toBlob(blob => {
     if (!blob || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-    const videoTime = videoPlayer.currentTime;
-
     blob.arrayBuffer().then(jpegBuf => {
-      // 构造消息：[0x02][8字节 float64 LE 时间][JPEG bytes]
-      const header = new ArrayBuffer(9);
-      const view   = new DataView(header);
-      view.setUint8(0, 0x02);
-      view.setFloat64(1, videoTime, true);  // little-endian
-
-      const msg = new Uint8Array(9 + jpegBuf.byteLength);
-      msg.set(new Uint8Array(header), 0);
-      msg.set(new Uint8Array(jpegBuf), 9);
-      ws.send(msg.buffer);
+      sendJpegFrame(jpegBuf, videoPlayer.currentTime);
     });
   }, 'image/jpeg', 0.85);
 }

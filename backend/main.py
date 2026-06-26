@@ -311,6 +311,7 @@ class GameSession:
         self._analysis_paused = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._pcm_chunk_count = 0
+        self._video_frame_count = 0
 
     def _actions_timeline_text(self, t_sec: float) -> str:
         return self.action_timeline.summary_near(t_sec)
@@ -462,12 +463,18 @@ class GameSession:
         )
         frame = self.frame_buffer.latest_frame
         if frame is None:
-            logger.warning("User question skipped: no video frame available")
+            logger.warning(
+                "User question skipped: no video frame (frames_rx=%d). "
+                "请确保视频已播放或至少有一帧画面",
+                self._video_frame_count,
+            )
             await self._broadcast({
                 "type":  "status",
                 "state": "user_question_no_frame",
                 "text":  text,
+                "message": "画面未就绪，无法回答。请点击播放视频后再提问。",
             })
+            await self._broadcast({"type": "request_frame"})
             return
 
         await self.vlm_manager.submit(
@@ -547,6 +554,12 @@ class GameSession:
 
         def _decode_and_push():
             self.frame_buffer.push(jpeg_bytes, video_time)
+            self._video_frame_count += 1
+            if self._video_frame_count == 1:
+                logger.info(
+                    "First video frame received (t=%.2fs, %d bytes)",
+                    video_time, len(jpeg_bytes),
+                )
             notify = getattr(self.nitrogen, "on_frame_pushed", None)
             if callable(notify):
                 notify()
@@ -696,6 +709,13 @@ async def probe_health():
         "pcm_chunks": (
             _session._pcm_chunk_count if _session is not None else 0
         ),
+        "video_frames": (
+            _session._video_frame_count if _session is not None else 0
+        ),
+        "has_video_frame": (
+            _session.frame_buffer.latest_frame is not None
+            if _session is not None else False
+        ),
         "asr_state": (
             _session.asr_handler.activity_state
             if _session is not None else None
@@ -732,6 +752,13 @@ async def session_status():
         "websocket_ready": _websocket_stack_ready(),
         "pcm_chunks": (
             _session._pcm_chunk_count if _session is not None else 0
+        ),
+        "video_frames": (
+            _session._video_frame_count if _session is not None else 0
+        ),
+        "has_video_frame": (
+            _session.frame_buffer.latest_frame is not None
+            if _session is not None else False
         ),
         "asr_state": (
             _session.asr_handler.activity_state

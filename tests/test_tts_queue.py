@@ -363,12 +363,12 @@ class TestFrameBuffer:
         fb.push(make_jpeg_bytes(), 3.0)
         assert fb.latest_frame is not None
 
-    def test_seek_clears_frame(self):
+    def test_seek_keeps_frame(self):
         fb = FrameBuffer()
         fb.push(make_jpeg_bytes(), 5.0)
         assert fb.latest_frame is not None
         fb.seek(10.0)
-        assert fb.latest_frame is None
+        assert fb.latest_frame is not None
         assert fb.video_position == 10.0
 
     def test_initial_state(self):
