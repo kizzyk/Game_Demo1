@@ -58,12 +58,14 @@ class TTSQueue:
         inter_gap: float = 0.8,
         fallback_margin: float = 1.0,
         broadcast_audio: Optional[Callable[[int, bytes], None]] = None,
+        max_age: Optional[dict[Priority, float]] = None,
     ):
         self._tts   = tts_engine
         self._asr   = asr_handler
         self._gap   = inter_gap
         self._fallback_margin = fallback_margin
         self._broadcast_audio = broadcast_audio
+        self._max_age = dict(max_age) if max_age is not None else dict(MAX_AGE)
 
         tts_engine.on_audio_data = self._on_audio_data
 
@@ -101,7 +103,7 @@ class TTSQueue:
             priority=priority,
             enqueue_time=time.time(),
             text=text,
-            expire_sec=MAX_AGE[priority],
+            expire_sec=self._max_age[priority],
         )
         interrupt = False
         with self._lock:

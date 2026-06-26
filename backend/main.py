@@ -68,6 +68,7 @@ if FRONTEND_DIR.exists():
 
 _session: Optional["GameSession"] = None
 _ws_clients: list[WebSocket] = []
+_primary_ws: Optional[WebSocket] = None
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -115,7 +116,13 @@ class GameSession:
             asr_handler=self.asr_handler,
             inter_gap=cfg.tts_inter_utterance_gap,
             fallback_margin=cfg.tts_done_fallback_margin,
-            broadcast_audio=self._broadcast_tts_audio,   # Fix 14
+            broadcast_audio=self._broadcast_tts_audio,
+            max_age={
+                Priority.USER_ANSWER:  30.0,
+                Priority.FAST_HINT:    cfg.fast_hint_expire_sec,
+                Priority.SLOW_ADVICE:  cfg.slow_max_queue_age,
+                Priority.SLOW_SUMMARY: cfg.slow_max_queue_age,
+            },
         )
         self.vlm_manager = VLMRequestManager(
             tts_queue=self.tts_queue,
@@ -125,6 +132,8 @@ class GameSession:
             vlm_model=cfg.vlm_model,
             vlm_max_tokens=cfg.vlm_max_tokens,
             get_seek_generation=lambda: self.asr_handler.seek_generation,
+            vlm_dedup_sec=cfg.vlm_dedup_sec,
+            on_busy_change=self._on_vlm_busy_change,
         )
 
         self.tts_queue.set_callbacks(
@@ -311,6 +320,16 @@ class GameSession:
         self.nitrogen.resume()
         self.asr_handler.force_unmute()
 
+    async def on_video_ended(self):
+        """视频播放结束：暂停分析并停止播报"""
+        self._analysis_paused = True
+        self.frame_buffer.pause()
+        self.nitrogen.pause()
+        self.tts_queue.clear_and_stop()
+        await self.vlm_manager.cancel_all()
+        self.asr_handler.force_unmute()
+        await self._broadcast({"type": "video_ended"})
+
     # ── 帧与音频输入 ──────────────────────────────────────────────────
 
     def on_video_frame(self, jpeg_bytes: bytes, video_time: float):
@@ -322,6 +341,9 @@ class GameSession:
         self.asr_handler.process_audio_chunk(pcm_bytes)
 
     # ── TTS 回调 ──────────────────────────────────────────────────────
+
+    def _on_vlm_busy_change(self, busy: bool):
+        self._schedule(self._broadcast({"type": "vlm_state", "busy": busy}))
 
     def _on_asr_state_change(self, state: str):
         self._schedule(self._broadcast({"type": "asr_state", "state": state}))
@@ -430,8 +452,11 @@ async def websocket_endpoint(ws: WebSocket):
       客户端发：seek / playback / video_ready / tts_done
       服务端发：tts / tts_end / tts_interrupt / asr_state / perception / status / seek_done / video_ended
     """
+    global _primary_ws
     await ws.accept()
     _ws_clients.append(ws)
+    if _primary_ws is None:
+        _primary_ws = ws
     logger.info("WebSocket connected (total: %d)", len(_ws_clients))
 
     try:
@@ -478,9 +503,12 @@ async def websocket_endpoint(ws: WebSocket):
                             await _session.on_resume()
 
                     elif mtype == "video_ended" and _session:
-                        await _session._broadcast({"type": "video_ended"})
+                        await _session.on_video_ended()
 
                     elif mtype == "tts_done" and _session:
+                        if ws is not _primary_ws:
+                            logger.debug("tts_done ignored from non-primary client")
+                            continue
                         uid = int(data.get("utterance_id", -1))
                         if uid >= 0:
                             _session.tts_queue.on_client_tts_done(uid)
@@ -491,6 +519,8 @@ async def websocket_endpoint(ws: WebSocket):
     except WebSocketDisconnect:
         if ws in _ws_clients:
             _ws_clients.remove(ws)
+        if _primary_ws is ws:
+            _primary_ws = _ws_clients[0] if _ws_clients else None
         logger.info("WebSocket disconnected (total: %d)", len(_ws_clients))
 
 

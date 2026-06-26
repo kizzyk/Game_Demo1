@@ -180,6 +180,10 @@ function handleServerMessage(msg) {
       updateMicStatus(msg.state);
       break;
 
+    case 'vlm_state':
+      dotVLM.className = msg.busy ? 'dot active' : 'dot';
+      break;
+
     case 'perception':
       $('dbg-intent').textContent  = msg.intent;
       $('dbg-conf').textContent    = (msg.confidence * 100).toFixed(0) + '%';

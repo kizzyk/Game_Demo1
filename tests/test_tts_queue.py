@@ -128,6 +128,19 @@ class TestTTSQueueExpiry:
         queue_idle.push("新鲜提示", Priority.SLOW_ADVICE)
         mock_tts_engine.speak_async.assert_called_once()
 
+    def test_custom_max_age_from_config(self, mock_tts_engine, mock_asr_handler):
+        q = TTSQueue(
+            mock_tts_engine, mock_asr_handler,
+            inter_gap=0.0, fallback_margin=0.0,
+            max_age={Priority.FAST_HINT: 0.5},
+        )
+        with q._lock:
+            heapq.heappush(q._heap, make_item(
+                "过期快提示", Priority.FAST_HINT, age_sec=1.0, expire_sec=0.5,
+            ))
+        q._speak_next()
+        mock_tts_engine.speak_async.assert_not_called()
+
 
 class TestTTSQueuePlaybackDone:
     def test_stale_tts_done_ignored(self, queue_idle, mock_asr_handler):

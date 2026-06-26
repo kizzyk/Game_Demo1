@@ -1,6 +1,7 @@
 """测试 VLMRequestManager seek generation 校验"""
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -121,3 +122,72 @@ class TestVLMSeekGeneration:
             vlm_manager._tts.push.assert_not_called()
 
         asyncio.run(_run())
+
+
+class TestVLMDedupAndBusy:
+    def test_vlm_dedup_uses_configured_window(self):
+        from backend.slow.trigger import VLMRequestManager
+
+        tts = MagicMock()
+        ctx = MagicMock()
+        ctx.summarize.return_value = ""
+        fast_hist = MagicMock()
+        fast_hist.get_recent_summary.return_value = None
+        conv = MagicMock()
+
+        mgr = VLMRequestManager(
+            tts_queue=tts,
+            context_buffer=ctx,
+            fast_history=fast_hist,
+            conversation_history=conv,
+            vlm_dedup_sec=10.0,
+        )
+        frame = MagicMock()
+        event = make_event(etype=EventType.SUDDEN_DODGE, slow=True)
+
+        async def _run():
+            with patch(
+                "backend.slow.trigger.call_vlm",
+                new_callable=AsyncMock,
+                return_value="建议",
+            ):
+                await mgr.submit(event, frame)
+                await asyncio.sleep(0.05)
+                await mgr.submit(event, frame)
+                await asyncio.sleep(0.05)
+
+        asyncio.run(_run())
+        assert mgr._tts.push.call_count == 1
+
+    def test_busy_callback_on_submit_and_idle(self):
+        from backend.slow.trigger import VLMRequestManager
+
+        tts = MagicMock()
+        ctx = MagicMock()
+        ctx.summarize.return_value = ""
+        fast_hist = MagicMock()
+        fast_hist.get_recent_summary.return_value = None
+        conv = MagicMock()
+        busy_states: list[bool] = []
+
+        mgr = VLMRequestManager(
+            tts_queue=tts,
+            context_buffer=ctx,
+            fast_history=fast_hist,
+            conversation_history=conv,
+            on_busy_change=busy_states.append,
+        )
+        frame = MagicMock()
+        event = make_event(etype=EventType.SUDDEN_DODGE, slow=True)
+
+        async def _run():
+            with patch(
+                "backend.slow.trigger.call_vlm",
+                new_callable=AsyncMock,
+                return_value="建议",
+            ):
+                await mgr.submit(event, frame)
+                await asyncio.sleep(0.05)
+
+        asyncio.run(_run())
+        assert busy_states == [True, False]

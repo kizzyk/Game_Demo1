@@ -140,3 +140,13 @@ class TestGameSessionControls:
 
         asyncio.run(_run())
         session.asr_handler.force_unmute.assert_called_once()
+
+    def test_on_video_ended_pauses_analysis(self, session):
+        async def _run():
+            await session.on_video_ended()
+
+        asyncio.run(_run())
+        assert session._analysis_paused is True
+        session.tts_queue.clear_and_stop.assert_called_once()
+        session.vlm_manager.cancel_all.assert_called_once()
+        session._broadcast.assert_called()

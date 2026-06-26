@@ -31,8 +31,6 @@ class VLMRequestManager:
       其他事件          → SLOW_ADVICE  (中)
     """
 
-    VLM_DEDUP_SEC = 5.0   # 同类事件去重窗口（秒）
-
     def __init__(
         self,
         tts_queue: "TTSQueue",
@@ -42,6 +40,8 @@ class VLMRequestManager:
         vlm_model: str = "claude-sonnet-4-6",
         vlm_max_tokens: int = 120,
         get_seek_generation: Optional[Callable[[], int]] = None,
+        vlm_dedup_sec: float = 5.0,
+        on_busy_change: Optional[Callable[[bool], None]] = None,
     ):
         self._tts       = tts_queue
         self._ctx       = context_buffer
@@ -50,6 +50,8 @@ class VLMRequestManager:
         self._model     = vlm_model
         self._max_tokens = vlm_max_tokens
         self._get_seek_generation = get_seek_generation
+        self._vlm_dedup_sec = vlm_dedup_sec
+        self._on_busy_change = on_busy_change
 
         self._current_task: Optional[asyncio.Task] = None
         self._pending: Optional[dict] = None
@@ -80,7 +82,7 @@ class VLMRequestManager:
         # ── 去重（用户提问不去重）────────────────────────────────────
         if (not is_user_q
                 and event.type == self._last_event_type
-                and now - self._last_submit_time < self.VLM_DEDUP_SEC):
+                and now - self._last_submit_time < self._vlm_dedup_sec):
             logger.debug("VLM dedup skip: %s", event.type.value)
             return
 
@@ -107,6 +109,7 @@ class VLMRequestManager:
         # ── 提交 ──────────────────────────────────────────────────────
         if self._current_task is None or self._current_task.done():
             self._current_task = asyncio.create_task(self._run(task_args))
+            self._notify_busy(True)
         else:
             # 已有 in-flight：只保留优先级最高的 pending
             pending_pri = self._pending["priority"] if self._pending else 999
@@ -160,11 +163,13 @@ class VLMRequestManager:
             logger.error("VLM call failed: %s", e)
 
         finally:
-            # 处理 pending
             if self._pending:
                 pending = self._pending
                 self._pending = None
                 self._current_task = asyncio.create_task(self._run(pending))
+            else:
+                self._current_task = None
+                self._notify_busy(False)
 
     async def cancel_all(self):
         """视频 seek 时调用：取消所有在途请求"""
@@ -175,6 +180,15 @@ class VLMRequestManager:
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
         self._pending = None
+        self._current_task = None
+        self._notify_busy(False)
+
+    def _notify_busy(self, busy: bool):
+        if self._on_busy_change:
+            try:
+                self._on_busy_change(busy)
+            except Exception as e:
+                logger.error("VLM on_busy_change error: %s", e)
 
     def _is_seek_generation_valid(self, utterance_seek_gen: int | None) -> bool:
         if utterance_seek_gen is None:
